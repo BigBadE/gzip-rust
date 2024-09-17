@@ -1,0 +1,11 @@
+[package]
+name = "gzip"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+filetime = "0.2.25"
+atty = "0.2.14"
+crc = "3.2.1"
+byteorder = "1.4.3"
+chrono = "0.4.38"
