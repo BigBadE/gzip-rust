@@ -1,20 +1,19 @@
+use byteorder::{LittleEndian, ReadBytesExt};
+use chrono::{DateTime, Datelike, Local, Timelike};
+use crc::{Crc, Digest, CRC_16_IBM_SDLC};
 use std::collections::HashSet;
-use std::time::{SystemTime, Duration, UNIX_EPOCH};
 use std::fs::{File, Metadata};
-use std::{env, fs, io};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{stdout, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::exit;
-use byteorder::{LittleEndian, ReadBytesExt};
-use chrono::{DateTime, Local};
-use crc::{Crc, Digest, Table, CRC_16_IBM_SDLC};
+use std::time::{Duration, SystemTime};
+use std::{env, fs, io};
 
 // Constants (Assumed values for any not defined in the provided C code)
 const BITS: i32 = 16; // Assuming 16 bits
 const DEFLATED: i32 = 8;
 const OK: i32 = 0;
 const ERROR: i32 = 1;
-const MIN_PART: usize = 3;
 const MAX_PATH_LEN: usize = 1024; // As defined in the C code
 const Z_SUFFIX: &str = ".gz";
 const MAX_SUFFIX: usize = 30; // Assuming maximum suffix length
@@ -40,7 +39,6 @@ const LZW_MAGIC: &[u8] = b"\x1F\x9D"; // Magic header for SCO LZW Compress files
 const PKZIP_MAGIC: &[u8] = b"\x50\x4B\x03\x04"; // Magic header for pkzip files
 
 // gzip flag bytes
-const ASCII_FLAG: u8 = 0x01; // bit 0 set: file probably ascii text
 const HEADER_CRC: u8 = 0x02; // bit 1 set: CRC16 for the gzip header
 const EXTRA_FIELD: u8 = 0x04; // bit 2 set: extra field present
 const ORIG_NAME: u8 = 0x08; // bit 3 set: original file name present
@@ -53,7 +51,7 @@ const STORED: u8 = 0;
 const COMPRESSED: u8 = 1;
 const PACKED: u8 = 2;
 const LZHED: u8 = 3;
-const MAX_METHODS: u8 = 9;
+const MAX_METHODS: usize = 9;
 
 const HELP_MSG: &[&str] = &[
     "Compress or uncompress FILEs (by default, compress FILES in-place).",
@@ -105,10 +103,10 @@ struct GzipState {
     quiet: bool,
     do_lzw: bool,
     test: bool,
-    foreground: bool,
+    _foreground: bool,
     // Program state
     program_name: String,
-    env: Option<String>,
+    _env: Option<String>,
     args: Vec<String>,
     z_suffix: String,
     z_len: usize,
@@ -116,14 +114,14 @@ struct GzipState {
     maxbits: i32,
     method: i32,
     level: i32,
-    save_orig_name: i32,
-    last_member: i32,
+    save_orig_name: bool,
+    last_member: bool,
     part_nb: i32,
     time_stamp: Option<SystemTime>,
     ifile_size: i64,
-    caught_signals: HashSet<i32>,
-    exiting_signal: Option<i32>,
-    remove_ofname_fd: Option<i32>,
+    _caught_signals: HashSet<i32>,
+    _exiting_signal: Option<i32>,
+    _remove_ofname_fd: Option<i32>,
     bytes_in: i64,
     bytes_out: i64,
     total_in: i64,
@@ -131,17 +129,19 @@ struct GzipState {
     ifname: String,
     ofname: String,
     istat: Option<Metadata>,
-    ifd: Option<std::fs::File>,
-    ofd: Option<std::fs::File>,
+    ifd: Option<Box<dyn Read>>,
+    ofd: Option<Box<dyn Write>>,
     insize: usize,
     inptr: usize,
     outcnt: usize,
-    handled_sig: Vec<i32>,
+    _handled_sig: Vec<i32>,
     header_bytes: usize,
     // Function pointer for the current operation
-    work: Option<fn(&mut std::fs::File, &mut std::fs::File, &mut GzipState) -> io::Result<()>>,
+    work: Option<fn(&mut GzipState) -> io::Result<()>>,
     inbuf: [u8; INBUFSIZ], // Input buffer
     crc16_digest: Digest<'static, u16>,
+    first_time: bool,
+    record_io: bool
 }
 
 // Implementation of the GzipState struct
@@ -163,9 +163,9 @@ impl GzipState {
             quiet: false,
             do_lzw: false,
             test: false,
-            foreground: false,
+            _foreground: false,
             program_name,
-            env: None,
+            _env: None,
             args: vec![],
             z_suffix: Z_SUFFIX.to_string(),
             z_len: Z_SUFFIX.len(),
@@ -173,14 +173,14 @@ impl GzipState {
             maxbits: BITS,
             method: DEFLATED,
             level: 6,
-            save_orig_name: 0,
-            last_member: 0,
+            save_orig_name: false,
+            last_member: false,
             part_nb: 0,
             time_stamp: None,
             ifile_size: -1,
-            caught_signals: HashSet::new(),
-            exiting_signal: None,
-            remove_ofname_fd: None,
+            _caught_signals: HashSet::new(),
+            _exiting_signal: None,
+            _remove_ofname_fd: None,
             bytes_in: 0,
             bytes_out: 0,
             total_in: 0,
@@ -193,11 +193,13 @@ impl GzipState {
             insize: 0,
             inptr: 0,
             outcnt: 0,
-            handled_sig: vec![],
+            _handled_sig: vec![],
             header_bytes: 0,
             work: None, // Function pointer will be set during runtime
             inbuf: [0; INBUFSIZ],
             crc16_digest: CRC16.digest(),
+            first_time: false,
+            record_io: false
         }
     }
 
@@ -248,11 +250,8 @@ impl GzipState {
         println!("Written by Jean-loup Gailly.");
     }
 
-    fn progerror(&mut self, message: &str) {
-        eprintln!("{}: {}", self.program_name, message);
-        if let Some(os_error) = io::Error::last_os_error().raw_os_error() {
-            eprintln!("{}", io::Error::from_raw_os_error(os_error));
-        }
+    fn progerror(&mut self, path: &Path) {
+        eprintln!("{}: {}", self.program_name, path.display());
         self.exit_code = ERROR;
     }
 
@@ -349,7 +348,7 @@ impl GzipState {
     // For brevity, let's assume they are already implemented as in previous translations
 
     // Entry point to start processing files or stdin
-    fn run(&mut self) {
+    fn run(&mut self) -> io::Result<()> {
         // By default, save name and timestamp on compression but do not restore them on decompression.
         if self.no_time.is_none() {
             self.no_time = Some(self.decompress);
@@ -375,28 +374,28 @@ impl GzipState {
                 // Set stdout to binary mode if necessary
                 // In Rust, stdout is typically in binary mode
             }
-            for filename in &self.args {
-                self.treat_file(filename);
+            for filename in self.args.clone() {
+                self.treat_file(&filename)?;
             }
         } else {
             // Process standard input
-            self.treat_stdin();
+            self.treat_stdin()?;
         }
 
         if self.list && !self.quiet && self.args.len() > 1 {
-            self.do_list(None, None); // Print totals
+            self.do_list::<File>(None, -1)?; // Print totals
         }
 
         self.do_exit(self.exit_code);
     }
 
     // Placeholder for treat_file function
-    fn treat_file(&mut self, iname: &str) {
+    fn treat_file(&mut self, iname: &str) -> io::Result<()> {
         if iname == "-" {
             let cflag = self.to_stdout;
             self.treat_stdin()?; // Assume treat_stdin is implemented
             self.to_stdout = cflag;
-            return;
+            return Ok(());
         }
 
         let path = Path::new(iname);
@@ -406,7 +405,7 @@ impl GzipState {
             Ok(meta) => meta,
             Err(err) => {
                 eprintln!("{}: {}", self.program_name, err);
-                return;
+                return Ok(());
             }
         };
         self.istat = Some(metadata.clone());
@@ -511,7 +510,7 @@ impl GzipState {
         }
 
         if self.list {
-            self.do_list(&mut ifd, self.method)?; // Assume do_list is implemented
+            self.do_list(Some(&mut ifd), self.method)?; // Assume do_list is implemented
             return Ok(());
         }
 
@@ -537,7 +536,8 @@ impl GzipState {
 
         loop {
             if let Some(work_fn) = self.work {
-                if work_fn(&mut ifd, self.ofd.as_mut().unwrap(), self).is_err() {
+                self.ifd = Some(Box::new(ifd.try_clone()?));
+                if work_fn(self).is_err() {
                     self.method = -1;
                     break;
                 }
@@ -601,6 +601,67 @@ impl GzipState {
             }
             eprintln!();
         }
+        return Ok(());
+    }
+
+    fn treat_dir(&mut self, dir: &Path) -> io::Result<()> {
+        // Attempt to read the directory entries
+        let dir_entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(_) => {
+                self.progerror(dir);
+                return Ok(());
+            }
+        };
+
+        // Iterate over the directory entries
+        for entry_result in dir_entries {
+            let entry = match entry_result {
+                Ok(e) => e,
+                Err(_) => {
+                    self.progerror(dir);
+                    continue;
+                }
+            };
+
+            let file_name = entry.file_name();
+            let file_name_str = file_name.to_string_lossy();
+
+            // Skip "." and ".." entries
+            if file_name_str == "." || file_name_str == ".." {
+                continue;
+            }
+
+            let dir_str = dir.to_string_lossy();
+            let len = dir_str.len();
+            let entrylen = file_name_str.len();
+
+            // Check if the combined path length is within limits
+            if len + entrylen < MAX_PATH_LEN - 2 {
+                let mut nbuf = PathBuf::from(dir);
+
+                // On some systems, an empty `dir` means the current directory
+                if !dir_str.is_empty() {
+                    nbuf.push(&file_name);
+                } else {
+                    nbuf = PathBuf::from(&file_name);
+                }
+
+                // Call treat_file with the new path
+                if let Err(e) = self.treat_file(nbuf.to_str().unwrap()) {
+                    eprintln!("Error processing file {}: {}", nbuf.display(), e);
+                    self.exit_code = ERROR;
+                }
+            } else {
+                eprintln!(
+                    "{}: {}/{}: pathname too long",
+                    self.program_name,
+                    dir.display(),
+                    file_name_str
+                );
+                self.exit_code = ERROR;
+            }
+        }
 
         Ok(())
     }
@@ -634,7 +695,6 @@ impl GzipState {
         self.part_nb = 0;
 
         let mut stdin = io::stdin();
-        let mut stdout = io::stdout();
 
         if self.decompress {
             self.method = match self.get_method(&mut stdin)? {
@@ -646,13 +706,15 @@ impl GzipState {
         }
 
         if self.list {
-            self.do_list(Some(&mut stdin), Some(self.method))?;
+            self.do_list(Some(&mut stdin), self.method)?;
             return Ok(());
         }
 
         loop {
             if let Some(work_fn) = self.work {
-                if work_fn(&mut stdin, &mut stdout, self).is_err() {
+                self.ifd = Some(Box::new(io::stdin()));
+                self.ofd = Some(Box::new(io::stdout()));
+                if work_fn(self).is_err() {
                     return Ok(());
                 }
             } else {
@@ -687,10 +749,10 @@ impl GzipState {
     }
 
     fn get_method<R: Read>(&mut self, input: &mut R) -> io::Result<Option<i32>> {
-        let mut flags: u8;
+        let flags: u8;
         let mut magic = [0u8; 10];
-        let mut imagic0: Option<u8>;
-        let mut imagic1: Option<u8>;
+        let imagic0: Option<u8>;
+        let imagic1: Option<u8>;
         let mut stamp: u32;
 
         if self.force == 0 && self.to_stdout {
@@ -718,7 +780,7 @@ impl GzipState {
         self.method = -1;
         self.part_nb += 1;
         self.header_bytes = 0;
-        self.last_member = 1;
+        self.last_member = true;
 
         if magic[0..2] == GZIP_MAGIC[..] || magic[0..2] == OLD_GZIP_MAGIC[..] {
             self.method = self.get_byte(input)? as i32;
@@ -794,7 +856,7 @@ impl GzipState {
                 if self.no_name.unwrap_or(false) || (self.to_stdout && !self.list) || self.part_nb > 1 {
                     self.discard_input_bytes(input, usize::MAX, flags)?;
                 } else {
-                    let mut p = self.ofname.clone();
+                    let p = self.ofname.clone();
                     let base = self.gzip_base_name(&p);
                     let mut p_bytes = base.as_bytes().to_vec();
                     loop {
@@ -849,7 +911,7 @@ impl GzipState {
             if self.check_zipfile(input).is_err() {
                 return Ok(None);
             }
-            self.last_member = 1;
+            self.last_member = true;
             return Ok(Some(self.method));
         } else if magic[0..2] == PACK_MAGIC[..] {
             self.work = Some(unpack);
@@ -858,12 +920,12 @@ impl GzipState {
         } else if magic[0..2] == LZW_MAGIC[..] {
             self.work = Some(unlzw);
             self.method = COMPRESSED as i32;
-            self.last_member = 1;
+            self.last_member = true;
             return Ok(Some(self.method));
         } else if magic[0..2] == LZH_MAGIC[..] {
             self.work = Some(unlzh);
             self.method = LZHED as i32;
-            self.last_member = 1;
+            self.last_member = true;
             return Ok(Some(self.method));
         } else if self.force != 0 && self.to_stdout && !self.list {
             self.method = STORED as i32;
@@ -871,9 +933,9 @@ impl GzipState {
             if let Some(_byte) = imagic1 {
                 self.inptr -= 1;
             }
-            self.last_member = 1;
+            self.last_member = true;
             if let Some(byte) = imagic0 {
-                self.write_buf(&[byte], 1)?;
+                self.write_buf(&mut io::stdout(), &[byte], 1)?;
                 self.bytes_out += 1;
             }
             return Ok(Some(self.method));
@@ -965,7 +1027,7 @@ impl GzipState {
         self.crc16_digest.clone().finalize() as u32
     }
 
-    fn gzip_base_name(&self, fname: &str) -> &str {
+    fn gzip_base_name<'a>(&self, fname: &'a str) -> &'a str {
         Path::new(fname)
             .file_name()
             .and_then(|s| s.to_str())
@@ -1002,14 +1064,12 @@ impl GzipState {
         self.ofname = legal_name;
     }
 
-    fn write_buf<W: Write>(&mut self, output: &mut W, buf: &[u8]) -> io::Result<()> {
-        output.write_all(buf)
+    fn write_buf<W: Write>(&mut self, output: &mut W, buf: &[u8], count: usize) -> io::Result<()> {
+        output.write_all(&buf[..count])
     }
 
     fn check_zipfile<R: Read>(&mut self, input: &mut R) -> io::Result<()> {
         const ZIP_LOCAL_HEADER_SIGNATURE: u32 = 0x04034b50;
-        const ZIP_CENTRAL_DIRECTORY_SIGNATURE: u32 = 0x02014b50;
-        const ZIP_END_OF_CENTRAL_DIR_SIGNATURE: u32 = 0x06054b50;
 
         // Read the local file header
         let signature = self.read_u32_le(input)?;
@@ -1020,8 +1080,8 @@ impl GzipState {
         }
 
         // Read and parse the local file header
-        let version_needed = self.read_u16_le(input)?;
-        let flags = self.read_u16_le(input)?;
+        let _version_needed = self.read_u16_le(input)?;
+        let _flags = self.read_u16_le(input)?;
         let compression_method = self.read_u16_le(input)?;
         let _last_mod_time = self.read_u16_le(input)?;
         let _last_mod_date = self.read_u16_le(input)?;
@@ -1050,7 +1110,7 @@ impl GzipState {
 
         // Set the compression method
         self.method = compression_method as i32;
-        self.last_member = 1; // Assume single member for simplicity
+        self.last_member = true; // Assume single member for simplicity
 
         // Prepare the work function based on the compression method
         match self.method {
@@ -1078,96 +1138,174 @@ impl GzipState {
         input.read_u32::<LittleEndian>()
     }
 
-    fn do_list<R: Read + Seek>(&mut self, input: Option<&mut R>, method: Option<i32>) -> io::Result<()> {
-        if input.is_none() && method.is_none() {
-            // Print totals
-            if self.total_in > 0 {
-                let ratio = if self.total_in > 0 {
-                    100.0 - (self.total_out as f64 * 100.0 / self.total_in as f64)
-                } else {
-                    0.0
-                };
+    fn do_list<R: Read>(&mut self, input: Option<&mut R>, method: i32) -> io::Result<()> {
+        const METHODS: [&str; MAX_METHODS] = [
+            "store",  /* 0 */
+            "compr",  /* 1 */
+            "pack ",  /* 2 */
+            "lzh  ",  /* 3 */
+            "", "", "", "", /* 4 to 7 reserved */
+            "defla",  /* 8 */
+        ];
 
+        let mut positive_off_t_width = 1;
+        let mut o = i64::MAX;
+
+        while o > 9 {
+            positive_off_t_width += 1;
+            o /= 10;
+        }
+
+        if self.first_time && method >= 0 {
+            self.first_time = false;
+            if self.verbose != 0 {
+                print!("method  crc     date  time  ");
+            }
+            if !self.quiet {
                 println!(
-                    "{:10} {:10} {:5.1}% (totals)",
-                    self.total_out,
-                    self.total_in,
-                    ratio,
+                    "{:>width$} {:>width$}  ratio uncompressed_name",
+                    "compressed",
+                    "uncompressed",
+                    width = positive_off_t_width as usize
                 );
             }
+        } else if method < 0 {
+            if self.total_in <= 0 || self.total_out <= 0 {
+                return Ok(());
+            }
+            if self.verbose != 0 {
+                print!("                            ");
+            }
+            if self.verbose != 0 || !self.quiet {
+                self.fprint_off(&mut stdout(), self.total_in, positive_off_t_width)?;
+                print!(" ");
+                self.fprint_off(&mut stdout(), self.total_out, positive_off_t_width)?;
+                print!(" ");
+            }
+            self.display_ratio(
+                self.total_out - (self.total_in - self.header_bytes as i64),
+                self.total_out,
+            );
+            println!(" (totals)");
             return Ok(());
         }
 
-        // Proceed with listing individual file
-        let input = input.unwrap();
-        let method = method.unwrap();
+        let mut crc: u32 = !0; // unknown
+        self.bytes_out = -1;
+        self.bytes_in = self.ifile_size;
 
-        // Remember current position
-        let start_pos = input.seek(SeekFrom::Current(0))?;
+        if !self.record_io && method == DEFLATED && !self.last_member {
+            // Get the crc and uncompressed size for gzip'ed (not zip'ed) files.
+            // If the seek fails, we could use read() to get to the end, but
+            // --list is used to get quick results.
+            // Use "gunzip < foo.gz | wc -c" to get the uncompressed size if
+            // you are not concerned about speed.
+            //self.bytes_in = input.seek(SeekFrom::End(-8))? as i64;
+            //if self.bytes_in != -1 {
+                let mut buf = [0u8; 8];
+                input.unwrap().read_exact(&mut buf)?;
+                self.bytes_in += 8;
+                crc = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                self.bytes_out = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as i64;
+            //}
+        }
 
-        // Read the gzip header
-        let header = self.read_gzip_header(input)?;
+        if self.verbose != 0 {
+            print!("{:5} {:08x} ", METHODS[method as usize], crc);
+            if let Some(time_stamp) = self.time_stamp {
+                let datetime: DateTime<Local> = DateTime::from(time_stamp);
+                print!(
+                    "{}{:3} {:02}:{:02} ",
+                    datetime.format("%b"),
+                    datetime.day(),
+                    datetime.hour(),
+                    datetime.minute()
+                );
+            } else {
+                print!("??? ?? ??:?? ");
+            }
+        }
 
-        // Determine the compression method string
-        let method_string = match method {
-            DEFLATED => "deflate",
-            // Add other methods if needed
-            _ => "unknown",
-        };
+        self.fprint_off(&mut stdout(), self.bytes_in, positive_off_t_width)?;
+        print!(" ");
+        self.fprint_off(&mut stdout(), self.bytes_out, positive_off_t_width)?;
+        print!(" ");
 
-        // Get the timestamp from the header
-        let time_stamp = if header.mtime != 0 {
-            UNIX_EPOCH + Duration::from_secs(header.mtime as u64)
-        } else {
-            self.time_stamp.unwrap_or(SystemTime::now())
-        };
+        if self.bytes_in == -1 {
+            self.total_in = -1;
+            self.bytes_in = 0;
+            self.bytes_out = 0;
+            self.header_bytes = 0;
+        } else if self.total_in >= 0 {
+            self.total_in += self.bytes_in;
+        }
 
-        // Get the original filename from the header if available
-        let filename = if let Some(original_filename) = header.original_filename {
-            original_filename
-        } else {
-            self.ifname.clone()
-        };
+        if self.bytes_out == -1 {
+            self.total_out = -1;
+            self.bytes_in = 0;
+            self.bytes_out = 0;
+            self.header_bytes = 0;
+        } else if self.total_out >= 0 {
+            self.total_out += self.bytes_out;
+        }
 
-        // Seek to the end to get compressed size
-        let end_pos = input.seek(SeekFrom::End(0))?;
-        let compressed_size = end_pos - start_pos;
-
-        // Read the gzip footer (trailer)
-        input.seek(SeekFrom::End(-8))?;
-        let footer = self.read_gzip_footer(input)?;
-
-        let uncompressed_size = footer.isize as u64;
-
-        // Seek back to start position
-        input.seek(SeekFrom::Start(start_pos))?;
-
-        // Calculate compression ratio
-        let ratio = if uncompressed_size > 0 {
-            100.0 - (compressed_size as f64 * 100.0 / uncompressed_size as f64)
-        } else {
-            0.0
-        };
-
-        // Format the timestamp
-        let datetime: DateTime<Local> = DateTime::from(time_stamp);
-        let formatted_time = datetime.format("%Y-%m-%d %H:%M:%S").to_string();
-
-        // Display the information
-        println!(
-            "{:10} {:10} {:5.1}% {:8} {} {}",
-            compressed_size,
-            uncompressed_size,
-            ratio,
-            method_string,
-            formatted_time,
-            filename
+        self.display_ratio(
+            self.bytes_out - (self.bytes_in - self.header_bytes as i64),
+            self.bytes_out,
         );
+        println!(" {}", self.ofname);
 
-        // Update total sizes if required
-        self.total_in += uncompressed_size as i64;
-        self.total_out += compressed_size as i64;
+        Ok(())
+    }
 
+    fn fprint_off<W: Write>(&self, file: &mut W, mut offset: i64, width: usize) -> io::Result<()> {
+        // Buffer to hold the string representation of the offset
+        let mut buf = [0u8; 65]; // 64 digits max for i64 plus sign
+        let mut p = buf.len();
+
+        // Don't negate offset here; it might overflow.
+        if offset < 0 {
+            // Build the digits in reverse order
+            loop {
+                p -= 1;
+                buf[p] = b'0' - (offset % 10) as u8;
+                offset /= 10;
+                if offset == 0 {
+                    break;
+                }
+            }
+            p -= 1;
+            buf[p] = b'-';
+        } else {
+            // Positive offset
+            loop {
+                p -= 1;
+                buf[p] = b'0' + (offset % 10) as u8;
+                offset /= 10;
+                if offset == 0 {
+                    break;
+                }
+            }
+        }
+
+        // Calculate the number of digits
+        let num_digits = buf.len() - p;
+
+        // Adjust the width by subtracting the number of digits
+        let mut width = if width > num_digits {
+            width - num_digits
+        } else {
+            0
+        };
+
+        // Write leading spaces to align the number to the right
+        while width > 0 {
+            file.write_all(b" ")?;
+            width -= 1;
+        }
+
+        // Write the number to the file
+        file.write_all(&buf[p..])?;
         Ok(())
     }
 
@@ -1263,44 +1401,63 @@ impl GzipState {
         // Clear any buffers if needed
         self.bytes_in = 0;
         self.bytes_out = 0;
+        self.insize = 0;
+        self.inptr = 0;
+        self.outcnt = 0;
+    }
+
+    // Function to write a single byte
+    fn put_byte(&mut self, byte: u8) -> io::Result<()> {
+        self.ofd.as_mut().unwrap().write_all(&[byte])?;
+        self.outcnt += 1;
+        self.crc16_digest.update(&[byte]);
+        Ok(())
+    }
+
+    // Function to write a 4-byte little-endian unsigned long
+    fn put_long(&mut self, value: u32) -> io::Result<()> {
+        let bytes = value.to_le_bytes();
+        self.ofd.as_mut().unwrap().write_all(&bytes)?;
+        self.outcnt += 4;
+        self.crc16_digest.update(&bytes);
+        Ok(())
     }
 }
 
-// Example function signatures for 'zip', 'unzip', and 'lzw' functions
-fn unpack(infile: &mut std::fs::File, outfile: &mut std::fs::File, state: &mut GzipState) -> io::Result<()> {
+fn zip(_state: &mut GzipState) -> io::Result<()> {
     unimplemented!()
 }
 
-fn unlzw(infile: &mut std::fs::File, outfile: &mut std::fs::File, state: &mut GzipState) -> io::Result<()> {
+fn unpack(_state: &mut GzipState) -> io::Result<()> {
     unimplemented!()
 }
 
-fn lzw(infile: &mut std::fs::File, outfile: &mut std::fs::File, state: &mut GzipState) -> io::Result<()> {
+fn unlzw(_state: &mut GzipState) -> io::Result<()> {
     unimplemented!()
 }
 
-fn unlzh(infile: &mut std::fs::File, outfile: &mut std::fs::File, state: &mut GzipState) -> io::Result<()> {
+fn lzw(_state: &mut GzipState) -> io::Result<()> {
     unimplemented!()
 }
 
-fn unzip(infile: &mut std::fs::File, outfile: &mut std::fs::File, state: &mut GzipState) -> io::Result<()> {
+fn unlzh(_state: &mut GzipState) -> io::Result<()> {
     unimplemented!()
 }
 
-fn zip(infile: &mut std::fs::File, outfile: &mut std::fs::File, state: &mut GzipState) -> io::Result<()> {
+fn unzip(_state: &mut GzipState) -> io::Result<()> {
     unimplemented!()
 }
 
-fn copy(infile: &mut std::fs::File, outfile: &mut std::fs::File, state: &mut GzipState) -> io::Result<()> {
+fn copy(_state: &mut GzipState) -> io::Result<()> {
     unimplemented!()
 }
 
-fn main() {
+fn main() -> io::Result<()> {
     let mut state = GzipState::new();
 
     // Parse command-line arguments
     state.parse_args();
 
     // Run the main processing loop
-    state.run();
+    state.run()
 }
