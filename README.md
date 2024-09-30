@@ -17,9 +17,9 @@
 
 # Results:
 Total: 1311 LOC
-Accuracy for compilation: 96.6%
+Accuracy for compilation: (todo)
 Manual fixes needed for simple (basic mismated types) errors: 17 lines
-Manual fixes needed for more advanced errors: 28 lines
+Manual fixes needed for more advanced errors: 31 lines
 
 Note: This does not include bugs, given there were no tests. I manually tested it and found a few bugs, for example incorrect argument parsing ordering causing the version and license argument to not work
 Also note: Rust auto-fixable warnings were applied for cleanliness (so I could see terminal output), the outputted code tended to ignore Results
