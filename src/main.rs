@@ -1,3 +1,8 @@
+mod trees;
+mod zip;
+mod deflate;
+
+use crate::zip::zip;
 use byteorder::{LittleEndian, ReadBytesExt};
 use chrono::{DateTime, Datelike, Local, Timelike};
 use crc::{Crc, Digest, CRC_16_IBM_SDLC};
@@ -59,7 +64,6 @@ const COMPRESSED: u8 = 1;
 const PACKED: u8 = 2;
 const LZHED: u8 = 3;
 const MAX_METHODS: usize = 9;
-
 const HELP_MSG: &[&str] = &[
     "Compress or uncompress FILEs (by default, compress FILES in-place).",
     "",
@@ -92,6 +96,7 @@ const HELP_MSG: &[&str] = &[
     "",
     "Report bugs to <bug-gzip@gnu.org>.",
 ];
+
 
 // The main state structure encapsulating all the global variables
 struct GzipState {
@@ -217,7 +222,7 @@ impl GzipState {
         } else if self.do_lzw {
             self.work = Some(lzw); // Assuming 'lzw' is defined elsewhere
         } else {
-            self.work = Some(GzipState::zip); // Assuming 'zip' is defined elsewhere
+            self.work = Some(zip); // Assuming 'zip' is defined elsewhere
         }
     }
 
@@ -594,13 +599,13 @@ impl GzipState {
                 eprint!(" OK");
             } else if self.decompress {
                 self.display_ratio(
-                    self.bytes_out - (self.bytes_in - self.header_bytes as i64),
+                    self.bytes_out - (self.bytes_in as i64 - self.header_bytes as i64),
                     self.bytes_out,
                 );
             } else {
                 self.display_ratio(
-                    self.bytes_in - (self.bytes_out - self.header_bytes as i64),
-                    self.bytes_in,
+                    self.bytes_in as i64 - (self.bytes_out - self.header_bytes as i64),
+                    self.bytes_in as i64,
                 );
             }
             if !self.test && !self.to_stdout {
@@ -745,8 +750,8 @@ impl GzipState {
                 eprintln!(" OK");
             } else if !self.decompress {
                 self.display_ratio(
-                    self.bytes_in - (self.bytes_out - self.header_bytes as i64),
-                    self.bytes_in,
+                    self.bytes_in as i64 - (self.bytes_out as i64 - self.header_bytes as i64),
+                    self.bytes_in as i64,
                 );
                 eprintln!();
             }
@@ -1233,7 +1238,7 @@ impl GzipState {
             }
         }
 
-        self.fprint_off(&mut stdout(), self.bytes_in, positive_off_t_width)?;
+        self.fprint_off(&mut stdout(), self.bytes_in as i64, positive_off_t_width)?;
         print!(" ");
         self.fprint_off(&mut stdout(), self.bytes_out, positive_off_t_width)?;
         print!(" ");
@@ -1244,7 +1249,7 @@ impl GzipState {
             self.bytes_out = 0;
             self.header_bytes = 0;
         } else if self.total_in >= 0 {
-            self.total_in += self.bytes_in;
+            self.total_in += self.bytes_in as i64;
         }
 
         if self.bytes_out == -1 {
@@ -1427,63 +1432,6 @@ impl GzipState {
         self.ofd.as_mut().unwrap().write_all(&bytes)?;
         self.outcnt += 4;
         self.crc16_digest.update(&bytes);
-        Ok(())
-    }
-
-    fn zip(&mut self) -> io::Result<()> {
-        // Initialize output count
-        self.outcnt = 0;
-
-        // Write the gzip header
-        self.write_header()?;
-
-        // Initialize CRC
-        self.updcrc(0, 0); // Assuming `updcrc` initializes the CRC
-
-        // Initialize compression (bi_init, ct_init, lm_init)
-        self.bi_init();
-        self.ct_init();
-        self.lm_init();
-
-        // Write deflate flags and OS identifier
-        self.put_byte(self.deflate_flags as u8)?; // Assuming `deflate_flags` fits in u8
-        self.put_byte(OS_CODE)?;
-
-        // Write original filename if `save_orig_name` is set
-        if self.save_orig_name {
-            let basename = self.gzip_base_name(&self.ifname);
-            for byte in basename.bytes() {
-                self.put_byte(byte)?;
-            }
-            self.put_byte(0)?; // Null-terminate the filename
-        }
-
-        // Record header bytes
-        self.header_bytes = self.outcnt;
-
-        // Perform deflation (compression)
-        self.deflate()?;
-
-        // Optionally check input size (similar to C code)
-        #[cfg(not(any(target_os = "windows", target_os = "vms")))]
-        {
-            if self.ifile_size != -1 && self.bytes_in != self.ifile_size {
-                eprintln!(
-                    "{}: {}: file size changed while zipping",
-                    self.program_name, self.ifname
-                );
-            }
-        }
-
-        // Write the CRC and uncompressed size
-        self.put_long(self.crc16_digest.clone().finalize())?;
-        self.put_long(self.bytes_in)?;
-
-        self.header_bytes += 8; // 2 * 4 bytes
-
-        // Flush the output buffer
-        self.flush_outbuf()?;
-
         Ok(())
     }
 }

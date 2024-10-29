@@ -15,11 +15,28 @@
       - ChatGPT tended to stick to Rust paradigms when it was obvious, such as replacing i32 error codes with Results, though this didn’t always happen (better prompting may improve this more).
       - By providing the C code of the function at the time of translation as well as providing the entire file beforehand, hallucinations went down. My prompting was likely very suboptimal because I couldn't provide every single relevant Rust header and C snippet for every prompt
 
+# Running
+
+To build the project:
+``
+cargo build
+``
+
+To run it:
+``
+cargo run
+``
+
+To run integration tests:
+Install Gzip first, then
+``
+./tests.sh
+``
 # Results:
 Total: 1311 LOC
 Accuracy for compilation: (todo)
-Manual fixes needed for simple (basic mismated types) errors: 17 lines
-Manual fixes needed for more advanced errors: 31 lines
+Manual fixes needed for simple (basic mismated types) errors: 45 lines
+Manual fixes needed for more advanced errors: 45 lines
 
 Note: This does not include bugs, given there were no tests. I manually tested it and found a few bugs, for example incorrect argument parsing ordering causing the version and license argument to not work
 Also note: Rust auto-fixable warnings were applied for cleanliness (so I could see terminal output), the outputted code tended to ignore Results
