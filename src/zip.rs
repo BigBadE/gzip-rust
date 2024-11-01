@@ -46,7 +46,7 @@ pub fn zip (state: &mut GzipState) -> io::Result<()> {
     let mut deflate = Deflate::new();
     let mut attr = 0;
     let mut deflate_flags = 0;
-    trees.ct_init(&mut attr, &mut state.method);
+    trees.ct_init(&mut attr, state.method);
     deflate.lm_init(state, state.level, &mut deflate_flags);
 
     // Write deflate flags and OS identifier
@@ -55,7 +55,7 @@ pub fn zip (state: &mut GzipState) -> io::Result<()> {
 
     // Write original filename if `save_orig_name` is set
     if state.save_orig_name {
-        let basename = state.gzip_base_name(&state.ifname);
+        let basename = state.gzip_base_name(&state.ifname).to_string();
         for byte in basename.bytes() {
             state.put_byte(byte)?;
         }

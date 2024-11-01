@@ -153,7 +153,9 @@ struct GzipState {
     inbuf: [u8; INBUFSIZ], // Input buffer
     crc16_digest: Digest<'static, u16>,
     first_time: bool,
-    record_io: bool
+    record_io: bool,
+    bi_buf: u16,
+    bi_valid: u8
 }
 
 // Implementation of the GzipState struct
@@ -211,7 +213,9 @@ impl GzipState {
             inbuf: [0; INBUFSIZ],
             crc16_digest: CRC16.digest(),
             first_time: false,
-            record_io: false
+            record_io: false,
+            bi_buf: 0,
+            bi_valid: 0
         }
     }
 
@@ -1204,7 +1208,7 @@ impl GzipState {
 
         let mut crc: u32 = !0; // unknown
         self.bytes_out = -1;
-        self.bytes_in = self.ifile_size;
+        self.bytes_in = self.ifile_size.try_into().unwrap();
 
         if !self.record_io && method == DEFLATED && !self.last_member {
             // Get the crc and uncompressed size for gzip'ed (not zip'ed) files.
@@ -1262,7 +1266,7 @@ impl GzipState {
         }
 
         self.display_ratio(
-            self.bytes_out - (self.bytes_in - self.header_bytes as i64),
+            self.bytes_out - (self.bytes_in as i64 - self.header_bytes as i64),
             self.bytes_out,
         );
         println!(" {}", self.ofname);
@@ -1424,6 +1428,45 @@ impl GzipState {
         self.outcnt += 1;
         self.crc16_digest.update(&[byte]);
         Ok(())
+    }
+
+    /// Send a value on a given number of bits.
+    /// IN assertion: length <= 16 and value fits in length bits.
+    fn send_bits(&mut self, mut value: u16, length: u8) {
+        // If not enough room in bi_buf, use (valid) bits from bi_buf and
+        // (16 - bi_valid) bits from value, leaving (width - (16 - bi_valid))
+        // unused bits in value.
+
+        const BUF_SIZE: u8 = 16; // Size of bi_buf in bits
+
+        if self.bi_valid + length > BUF_SIZE {
+            // bi_buf has less room than the number of bits we need to add
+            self.bi_buf |= value << self.bi_valid;
+            self.put_short(self.bi_buf);
+
+            // Shift the value right by (BUF_SIZE - bi_valid) bits
+            self.bi_buf = ((value as u32) >> (BUF_SIZE - self.bi_valid)) as u16;
+            self.bi_valid = self.bi_valid + length - BUF_SIZE;
+        } else {
+            // There is enough room in bi_buf
+            self.bi_buf |= value << self.bi_valid;
+            self.bi_valid += length;
+        }
+    }
+
+    fn put_short(&mut self, value: u16) {
+        self.put_byte((value & 0xFF) as u8).unwrap();        // Lower byte
+        self.put_byte(((value >> 8) & 0xFF) as u8).unwrap(); // Upper byte
+    }
+
+    fn bi_windup(&mut self) {
+        if self.bi_valid > 8 {
+            self.put_short(self.bi_buf);
+        } else if self.bi_valid > 0 {
+            self.put_byte(self.bi_buf as u8).expect("Failed!");
+        }
+        self.bi_buf = 0;
+        self.bi_valid = 0;
     }
 
     // Function to write a 4-byte little-endian unsigned long

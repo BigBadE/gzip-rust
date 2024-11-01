@@ -14,6 +14,7 @@ pub(crate) const MAX_DIST: usize = 16384;
 pub(crate) const MAX_MATCH: usize = 258;
 const HASH_BITS: usize = 15;
 const HASH_MASK: u32 = (HASH_SIZE as u32) - 1;
+const WINDOW_SIZE: usize = 2*WSIZE;
 const H_SHIFT: u32 = ((HASH_BITS + MIN_MATCH - 1) / MIN_MATCH) as u32; // 5
 const CONFIGURATION_TABLE: [Config; 10] = [
     /* 0 */ Config::new(0, 0, 0, 0), /* store only */
@@ -63,7 +64,6 @@ pub struct Deflate {
     ins_h: u32,
     prev: Vec<u16>,             // For maintaining previous positions
     prev_length: usize,
-    window_size: usize,
     match_start: usize,
     max_insert_length: usize,
 }
@@ -83,9 +83,8 @@ impl Deflate {
             eofile: false,
             lookahead: 0,
             ins_h: 0,
-            prev: Vec::new(),
+            prev: vec![0; WSIZE],
             prev_length: 0,
-            window_size: 0,
             match_start: 0,
             max_insert_length: 0
         }
@@ -226,7 +225,7 @@ impl Deflate {
             if hash_head != NIL.into()
                 && self.strstart > hash_head
                 && self.strstart - hash_head <= MAX_DIST
-                && self.strstart <= self.window_size - MIN_LOOKAHEAD
+                && self.strstart <= WINDOW_SIZE - MIN_LOOKAHEAD
             {
                 // To prevent matches with the string of window index 0
                 match_length = self.longest_match(hash_head);
@@ -271,7 +270,7 @@ impl Deflate {
                 self.strstart += 1;
             }
             if flush {
-                self.flush_block(0);
+                self.flush_block_wrapper(tree, state, false);
                 self.block_start = self.strstart as i64;
             }
 
@@ -280,7 +279,29 @@ impl Deflate {
                 self.fill_window(state);
             }
         }
-        self.flush_block(1) // EOF
+        self.flush_block_wrapper(tree, state, true);
+        Ok(())
+    }
+
+    fn flush_block_wrapper(&mut self, trees: &mut Trees, state: &mut GzipState, eof: bool) -> i64 {
+        if self.block_start >= 0 {
+            let start = self.block_start as usize;
+            let end = self.strstart;
+
+            // Ensure indices are within the bounds of the window
+            if start <= end && end <= self.window.len() {
+                let buf = &self.window[start..end];
+                let stored_len = end - start;
+                trees.flush_block(state, Some(buf), stored_len as u64, eof)
+            } else {
+                // Handle invalid indices
+                panic!("flush_block_wrapper: Invalid window indices");
+            }
+        } else {
+            // block_start < 0
+            let stored_len = 0;
+            trees.flush_block(state, None, stored_len, eof)
+        }
     }
 
     fn insert_string(&mut self, s: usize) -> usize {
@@ -310,12 +331,12 @@ impl Deflate {
             chain_length >>= 2;
         }
         assert!(
-            self.strstart <= self.window_size - MIN_LOOKAHEAD,
+            self.strstart <= WINDOW_SIZE - MIN_LOOKAHEAD,
             "insufficient lookahead"
         );
 
         let window = &self.window;
-        let window_size = self.window_size;
+        let window_size = WINDOW_SIZE;
         let mut nice_match = self.nice_match as usize;
 
         let strend = self.strstart + MAX_MATCH;
