@@ -1374,10 +1374,16 @@ impl GzipState {
 
     fn create_outfile(&self) -> io::Result<File> {
         use std::fs::OpenOptions;
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&self.ofname)?;
+        let mut options = OpenOptions::new();
+        options.write(true);
+
+        if self.force == 1 {
+            options.create(true).truncate(true);
+        } else {
+            options.create_new(true);
+        }
+
+        let file = options.open(&self.ofname)?;
         Ok(file)
     }
 
