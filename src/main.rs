@@ -134,7 +134,7 @@ struct GzipState {
     _caught_signals: HashSet<i32>,
     _exiting_signal: Option<i32>,
     _remove_ofname_fd: Option<i32>,
-    bytes_in: i64,
+    pub bytes_in: i64,
     bytes_out: i64,
     total_in: i64,
     total_out: i64,
@@ -988,6 +988,7 @@ impl GzipState {
     fn get_byte<R: Read>(&mut self, input: &mut R) -> io::Result<u8> {
         if self.inptr >= self.insize {
             self.insize = input.read(&mut self.inbuf)?;
+            self.bytes_in += self.insize as i64;
             self.inptr = 0;
             if self.insize == 0 {
                 return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Unexpected EOF"));
@@ -1001,6 +1002,7 @@ impl GzipState {
     fn try_byte<R: Read>(&mut self, input: &mut R) -> io::Result<Option<u8>> {
         if self.inptr >= self.insize {
             self.insize = input.read(&mut self.inbuf)?;
+            self.bytes_in += self.insize as i64;
             self.inptr = 0;
             if self.insize == 0 {
                 return Ok(None);
@@ -1445,7 +1447,7 @@ impl GzipState {
 
         const BUF_SIZE: u8 = 16; // Size of bi_buf in bits
 
-        if self.bi_valid + length > BUF_SIZE {
+        if self.bi_valid + length >= BUF_SIZE {
             // bi_buf has less room than the number of bits we need to add
             self.bi_buf |= value << self.bi_valid;
             self.put_short(self.bi_buf);

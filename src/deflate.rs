@@ -147,6 +147,7 @@ impl Deflate {
         if let Some(ref mut input) = state.ifd {
             match input.read(&mut buf[..size]) {
                 Ok(bytes_read) => {
+                    state.bytes_in += size as i64;
                     (bytes_read, bytes_read == 0)
                 }
                 Err(e) => {
