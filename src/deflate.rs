@@ -147,6 +147,12 @@ impl Deflate {
         if let Some(ref mut input) = state.ifd {
             match input.read(&mut buf[..size]) {
                 Ok(bytes_read) => {
+
+                    if bytes_read > 0 {
+                        // 计算 CRC
+                        state.crc16_digest = state.updcrc(Some(&buf[..bytes_read]), bytes_read);
+                        println!("read CRC : {:#010x}", state.crc16_digest ^ 0xffffffff);
+                    }
                     state.bytes_in += size as i64;
                     (bytes_read, bytes_read == 0)
                 }

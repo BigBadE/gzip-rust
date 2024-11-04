@@ -727,8 +727,15 @@ impl<'a> Trees<'a> {
             eprintln!("\ncd {:3}", c);
         }
 
+         // Output the code and its length in hexadecimal
+        let code = tree[c].code;
+        let length = tree[c].len;
+
+//         eprintln!("Code: {:X}, Length: {}", code, length);
+
         // Send the code and its length using the send_bits function
-        state.send_bits(tree[c].code, tree[c].len as u8);
+        state.send_bits(code, length as u8);
+
     }
 
     fn copy_block(&mut self, state: &mut GzipState, buf: &[u8], len: usize, header: bool) {
