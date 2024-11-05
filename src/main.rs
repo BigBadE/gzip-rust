@@ -6,17 +6,16 @@ use crate::zip::zip;
 use byteorder::{LittleEndian, ReadBytesExt};
 use chrono::{DateTime, Datelike, Local, Timelike};
 // use crc::{Crc, Digest, CRC_16_IBM_SDLC};
-use crc::{Crc, Digest, CRC_32_ISO_HDLC};
+use crc::{Crc, CRC_32_ISO_HDLC};
 use std::collections::HashSet;
 use std::fs::{File, Metadata};
 use std::io::{stdout, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::exit;
-use std::time::{Duration, SystemTime};
-use std::{env, fs, io};
-use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, SystemTime};
+use std::{env, fs, io};
 
 // Constants (Assumed values for any not defined in the provided C code)
 const BITS: i32 = 16; // Assuming 16 bits
