@@ -16,6 +16,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 use std::{env, fs, io};
+use std::os::unix::fs::MetadataExt;
 
 // Constants (Assumed values for any not defined in the provided C code)
 const BITS: i32 = 16; // Assuming 16 bits
@@ -214,7 +215,8 @@ struct GzipState {
     first_time: bool,
     record_io: bool,
     bi_buf: u16,
-    bi_valid: u8
+    bi_valid: u8,
+    first_call: bool,
 }
 
 // Implementation of the GzipState struct
@@ -275,11 +277,12 @@ impl GzipState {
             header_bytes: 0,
             work: None, // Function pointer will be set during runtime
             inbuf: [0; INBUFSIZ],
-            crc16_digest: 0xffffffff,
+            crc16_digest: 0x00000000,
             first_time: false,
             record_io: false,
             bi_buf: 0,
-            bi_valid: 0
+            bi_valid: 0,
+            first_call: true,
         }
     }
 
