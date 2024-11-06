@@ -1115,7 +1115,6 @@ impl GzipState {
 //     }
 
     fn updcrc(&mut self, buf: Option<&[u8]>, len: usize) -> u32 {
-
         if buf.is_none() {
             self.crc16_digest = 0xffffffff;
         } else {

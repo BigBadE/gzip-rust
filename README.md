@@ -1,46 +1,106 @@
-# Steps
-- Ask for all globals in the file. This assumed the value of constants declared elsewhere, since I only passed a single file. Had to also specify that code should be platform independent, and should prefer safe code with no mutable static variables.
-- Ask for each function to be translated individually. Went up the call graph.
-    - Notable issues:
-      - Stuck to C patterns instead of refactoring them, for example using exit() instead of returning out of the entire function
-      - Duplicated globals
-      - Ignored conditional compilation flags
-      - ChatGPT would flat-out refuse to translate entire files, it may refuse large functions too
-      - Variable types would change in global structures (better prompting would likely fix)
-      - ChatGPT completely hallucinated the do_list function’s purpose, causing it to output a completely different function. This was fixed by passing in the entire function again, indicating memory is likely not that great
-      - ChatGPT failed to understand connections between constants, for example messing up the name for each compression method from its id
-      - ChatGPT stuck to the C method arguments when it shouldn't, leading to some borrow checker issues
-    - Strengths:
-      - ChatGPT knew to use external crates to fulfill platform-independent functionality, successfully adapting certain elements of gzip from linux-only methods to multi-platform ones
-      - ChatGPT tended to stick to Rust paradigms when it was obvious, such as replacing i32 error codes with Results, though this didn’t always happen (better prompting may improve this more).
-      - By providing the C code of the function at the time of translation as well as providing the entire file beforehand, hallucinations went down. My prompting was likely very suboptimal because I couldn't provide every single relevant Rust header and C snippet for every prompt
+# C to Rust Translation Tool for Gzip
 
-# Running
+This demonstrates the power of using a LLM (here, ChatGPT o1-preview) to safely and accurately translate code
 
-To build the project:
-``
+## Progress Overview
+
+Currently, this translation provides functionality to the gzip -1 to -3 (fast_deflate) compression levels.
+Higher levels are currently not implemented
+
+The program passes 2 out of the 3 current integration tests, failing on empty files (gzip gives empty files a crc32 of 3 instead of 0 for unknown reasons).
+
+### Translation Process
+1. **Globals Translation**:
+    - The translation ensures platform independence and avoids mutable static variables for safety, instead moving globals to dependency-injected structs.
+
+2. **Function Translation**:
+    - Each function is translated individually, progressing up the function call graph.
+    - **Challenges encountered**:
+        - Sticking to C patterns (e.g., using `exit()` instead of returning from functions).
+        - Duplicated globals and incorrect handling of conditional compilation flags.
+        - Refusal to translate entire files or large functions, especially when the code is too complex.
+        - Variable type mismatches in global structures.
+        - Hallucinated function behavior, such as with `do_list`.
+        - Misunderstandings of constants and compression methods.
+        - Issues with variable borrowing and references in Rust, often due to direct C-to-Rust mapping.
+
+    - **Strengths**:
+        - The tool successfully utilizes external crates for platform independence, adapting Linux-specific code to cross-platform functionality.
+        - It follows Rust paradigms when appropriate (e.g., replacing error codes with `Result` types), though this behavior needs improvement to fully migrate from C paradigms.
+        - Providing both the full C file and the current function for translation helped reduce hallucinations.
+        - With better prompting, the tool showed improvement in understanding more complex relationships and making the translation more idiomatic.
+
+### Current Results
+
+- **Total Lines of Code**: 1311 LOC
+- **Compilation Accuracy**: (TBD, needs further testing)
+- **Manual Fixes**:
+    - Simple errors (basic type mismatches): 75 lines
+    - Advanced errors (logical or structural issues): 63 lines
+- **Notable Issues**:
+    - Some **bugs** were identified through manual testing, such as incorrect argument parsing ordering, which broke version and license flags.
+    - **Rust auto-fixable warnings** were applied for code cleanliness, but the translated code still ignored `Result` handling in some cases.
+
+### Common Errors
+1. **Unspecified Generic Type**:
+    - The tool often left generic types unspecified in places where they weren’t part of the function arguments. This was resolved with better prompting.
+
+2. **Mutable Borrow on Immutably Borrowed Type**:
+    - This led to borrow checker issues, but the model was able to generate an elegant fix when prompted to adjust the borrowing semantics.
+
+## Outstanding Issues
+
+- **Hallucinations and Incorrect Function Behavior**:  
+  The model sometimes produces functions that don't match the intended logic of the original C code (e.g., `do_list` function). This requires providing more context or refining the model’s understanding.
+
+- **Incomplete Handling of Constants**:  
+  Some constants were misinterpreted or had incorrect mappings (e.g., compression method IDs and names). This may improve with more detailed prompting and context.
+
+- **Variable Borrowing**:  
+  The translation from C to Rust sometimes leads to borrow checker issues due to the incorrect handling of references, especially in the context of C-style arguments.
+
+- **Limited Understanding of C Macros**:  
+  The model struggles with handling C macros and conditional compilation flags, which may need special handling or manual intervention in certain cases.
+
+## Next Steps and Plans
+
+1. **Improve Prompting**:
+    - Refine the prompting mechanism to improve the translation accuracy, particularly in cases of complex functions, macros, and constants.
+
+2. **Expand Test Coverage**:
+    - Create automated tests to verify the correctness of the translated Rust code, beyond manual testing. This will help track bug fixes and regression.
+
+3. **Address Hallucinations**:
+    - Improve the model’s understanding of the original C code by providing more context, such as including more related functions or entire code blocks.
+
+4. **Error Handling in Rust**:
+    - Ensure that the Rust translation consistently handles errors with `Result` types and removes unsafe operations like `exit()` in favor of proper Rust error handling.
+
+## Running the Project
+
+### Build the Project
+To build the project, run:
+```bash
 cargo build
-``
+```
 
-To run it:
-``
+### Run the Project
+To run the translation tool:
+```bash
 cargo run
-``
+```
 
-To run integration tests:
-Install Gzip first, then
-``
+### Running Integration Tests
+
+1. Install the Gzip dependencies:
+    - Ensure you have the necessary dependencies for Gzip installed on your system.
+
+2. Run the integration tests:
+```bash
 ./tests.sh
-``
-# Results:
-Total: 1311 LOC
-Accuracy for compilation: (todo)
-Manual fixes needed for simple (basic mismated types) errors: 75 lines
-Manual fixes needed for more advanced errors: 63 lines
+```
 
-Note: This does not include bugs, given there were no tests. I manually tested it and found a few bugs, for example incorrect argument parsing ordering causing the version and license argument to not work
-Also note: Rust auto-fixable warnings were applied for cleanliness (so I could see terminal output), the outputted code tended to ignore Results
+## Conclusion
 
-Notable error types:
-- Unspecified generic type when the generic type wasn't in the arguments, which more prompting fixed
-- Mutable borrow on immutably borrowed type, though ChatGPT figured out an elegant fix with some more prompting
+This project demonstrates the feasibility of such a tool using LLMs. Of the over 3000 lines of code translated,
+only about 120 lines were manually fixed, leading to an accuracy of approximately 95% without advanced prompting, fuzzing, testing, or re-prompting methods.
