@@ -83,12 +83,8 @@ pub fn zip (state: &mut GzipState) -> io::Result<()> {
     let crc_value = state.crc16_digest;
     let uncompressed_size = state.bytes_in.try_into().unwrap();
 
-    println!("CRC: {:x}", crc_value);
-    println!("Uncompressed Size: {:x}", uncompressed_size);
-
     state.put_long(crc_value)?;
     state.put_long(uncompressed_size)?;
-
 
     state.header_bytes += 8; // 2 * 4 bytes
 

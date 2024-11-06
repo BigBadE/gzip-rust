@@ -151,7 +151,6 @@ impl Deflate {
                     if bytes_read > 0 {
                         // 计算 CRC
                         state.crc16_digest = state.updcrc(Some(&buf[..bytes_read]), bytes_read);
-                        println!("read CRC : {:#010x}", state.crc16_digest ^ 0xffffffff);
                     }
                     state.bytes_in += bytes_read as i64;
                     (bytes_read, bytes_read == 0)

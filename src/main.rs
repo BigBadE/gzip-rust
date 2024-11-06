@@ -28,11 +28,11 @@ const MAX_SUFFIX: usize = 30; // Assuming maximum suffix length
 
 const VERSION: &str = "1.0"; // Assuming version 1.0, replace with actual version.
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", target_pointer_width = "32"))]
 const OS_CODE: u8 = 0x0b;
 #[cfg(target_os = "macos")]
 const OS_CODE: u8 = 0x07;
-#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+#[cfg(all(not(all(target_os = "windows", target_pointer_width = "32")), not(target_os = "macos")))]
 const OS_CODE: u8 = 0x03;
 
 const CRC_32_TAB: [u32; 256] = [
@@ -129,27 +129,27 @@ const HELP_MSG: &[&str] = &[
     "Mandatory arguments to long options are mandatory for short options too.",
     "",
     // Assuming O_BINARY is false (platform-independent code)
+    "  -a, --ascii       ascii text; convert end-of-line using local conventions",
     "  -c, --stdout      write on standard output, keep original files unchanged",
     "  -d, --decompress  decompress",
-    "  -f, --force       force overwrite of output file",
+    "  -f, --force       force overwrite of output file and compress links",
     "  -h, --help        give this help",
     "  -k, --keep        keep (don't delete) input files",
     "  -l, --list        list compressed file contents",
     "  -L, --license     display software license",
-    "  -n, --no-name     do not save or restore the original name and time stamp",
-    "  -N, --name        save or restore the original name and time stamp",
+    "  -n, --no-name     do not save or restore the original name and timestamp",
+    "  -N, --name        save or restore the original name and timestamp",
     "  -q, --quiet       suppress all warnings",
     // Assuming directories are supported
     "  -r, --recursive   operate recursively on directories",
+    "      --rsyncable   make rsync-friendly archive",
     "  -S, --suffix=SUF  use suffix SUF on compressed files",
+    "      --synchronous synchronous output (safer if system crashes, but slower)",
     "  -t, --test        test compressed file integrity",
     "  -v, --verbose     verbose mode",
     "  -V, --version     display version number",
     "  -1, --fast        compress faster",
     "  -9, --best        compress better",
-    // Assuming LZW is defined
-    "  -Z, --lzw         produce output compatible with old compress",
-    "  -b, --bits=BITS   max number of bits per code (implies -Z)",
     "",
     "With no FILE, or when FILE is -, read standard input.",
     "",
@@ -222,7 +222,10 @@ impl GzipState {
 
 
     fn new() -> Self {
-        let program_name = env::args().next().unwrap_or_else(|| "gzip".to_string());
+        let program_name = env::args().next().unwrap_or_else(|| "gzip".to_string())
+            .split(".").next().unwrap()
+            .split("/").last().unwrap()
+            .split("\\").last().unwrap().to_string();
         GzipState {
             presume_input_tty: false,
             ascii: false,
@@ -1125,12 +1128,8 @@ impl GzipState {
             }
         }
         let count = COUNT.fetch_add(1, Ordering::SeqCst);
-        println!("CRC count: {}, CRC : {:#010x}", count, self.crc16_digest ^ 0xffffffff);
         self.crc16_digest ^ 0xffffffff // 返回最终的 CRC 值
-
     }
-
-
 
     fn gzip_base_name<'a>(&self, fname: &'a str) -> &'a str {
         Path::new(fname)
@@ -1518,7 +1517,12 @@ impl GzipState {
     }
 
     // Function to write a single byte
-    fn put_byte(&mut self, byte: u8) -> io::Result<()> {
+    fn put_byte(&mut self, mut byte: u8) -> io::Result<()> {
+        if self.to_stdout && String::from_utf8_lossy(&[byte]).as_bytes()[0] != byte {
+            self.ofd.as_mut().unwrap().write_all(String::from_utf8_lossy(&[byte]).as_bytes())?;
+            self.outcnt += 1;
+            return Ok(());
+        }
         self.ofd.as_mut().unwrap().write_all(&[byte])?;
         self.outcnt += 1;
 //         self.crc16_digest = self.updcrc(Some(&[byte]), 1);
