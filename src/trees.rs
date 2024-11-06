@@ -465,7 +465,11 @@ impl<'a> Trees<'a> {
             opt_lenb = static_lenb;
         }
 
-        if stored_len <= opt_lenb && eof && self.compressed_len == 0 {
+        fn seekable() -> bool {
+            false // 确保返回 false
+        }
+
+        if stored_len <= opt_lenb && eof && self.compressed_len == 0 && seekable() {
             // Since LIT_BUFSIZE <= 2*WSIZE, the input data must be there
             if buf.is_none() {
                 state.gzip_error("block vanished");
@@ -805,7 +809,9 @@ impl<'a> Trees<'a> {
             self.depth[new_node] = 0;
             self.opt_len = self.opt_len.wrapping_sub(1);
             if let Some(stree) = stree {
-                self.static_len = self.static_len.wrapping_sub(stree.borrow()[new_node].len as u64);
+                if self.static_len > 0 {
+                    self.static_len = self.static_len.wrapping_sub(stree.borrow()[new_node].len as u64);
+                }
             }
             // new_node is 0 or 1, so it does not have extra bits
         }

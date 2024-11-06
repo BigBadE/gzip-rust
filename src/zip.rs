@@ -38,9 +38,6 @@ pub fn zip (state: &mut GzipState) -> io::Result<()> {
 
     state.put_long(stamp)?;
 
-    // Initialize CRC
-    state.updcrc(None, 0);
-
     // Initialize compression (bi_init, ct_init, lm_init)
     let mut trees = Trees::new();
     let mut deflate = Deflate::new();
