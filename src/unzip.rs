@@ -35,11 +35,12 @@ const EXTHDR: usize = 16;       // size of extended local header, inc sig
 const RAND_HEAD_LEN: u32 = 12; // length of encryption random header
 
 /* Globals */
-mut decrypt: i32 = 0;        // flag to turn on decryption
-mut pkzip: i32 = 0;          // set for a pkzip file
-mut ext_header: i32 = 0;     // set if extended local header
+
 
 pub fn unzip (state: &mut GzipState) -> io::Result<()> {
+    let mut decrypt: i32 = 0;        // flag to turn on decryption
+    let mut pkzip: i32 = 0;          // set for a pkzip file
+    let mut ext_header: i32 = 0;     // set if extended local header
     let mut orig_crc: u32 = 0;        // original crc
     let mut orig_len: u32 = 0;        // original uncompressed length
     let mut n: i32;
@@ -76,7 +77,7 @@ pub fn unzip (state: &mut GzipState) -> io::Result<()> {
             state.gzip_error("invalid compressed data--length mismatch");
         }
         while n > 0 {
-            let c: u8 = inflate.get_byte(state);
+            let c: u8 = inflate.get_byte(state)?;
             state.put_byte(c);
             n -= 1;
         }
@@ -90,7 +91,7 @@ pub fn unzip (state: &mut GzipState) -> io::Result<()> {
         // crc32 (see algorithm.doc)
         // uncompressed input size modulo 2^32
         for n in 0..8 {
-            buf[n] = inflate.get_byte(state); // may cause an error if EOF
+            buf[n] = inflate.get_byte(state)?; // may cause an error if EOF
         }
         orig_crc = LG(&buf);
         orig_len = LG(&buf[4..]);
@@ -101,14 +102,15 @@ pub fn unzip (state: &mut GzipState) -> io::Result<()> {
         // compressed size 4-bytes
         // uncompressed size 4-bytes
         for n in 0..EXTHDR {
-            buf[n] = inflate.get_byte(state); // may cause an error if EOF
+            buf[n] = inflate.get_byte(state)?; // may cause an error if EOF
         }
         orig_crc = LG(&buf[4..]);
         orig_len = LG(&buf[12..]);
     }
 
+
     // Validate decompression
-    if  u32::from(orig_crc) != state.updcrc(Some(&state.outbuf), 0) {
+    if  u32::from(orig_crc) != state.updcrc(Some(&state.outbuf.clone()), 0) {
         eprintln!(
             "\n{}: {}: invalid compressed data--crc error",
             state.program_name, state.ifname
