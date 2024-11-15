@@ -1,8 +1,11 @@
 mod trees;
 mod zip;
 mod deflate;
+mod inflate;
+mod unzip;
 
 use crate::zip::zip;
+use crate::unzip::unzip;
 use byteorder::{LittleEndian, ReadBytesExt};
 use chrono::{DateTime, Datelike, Local, Timelike};
 // use crc::{Crc, Digest, CRC_16_IBM_SDLC};
@@ -120,9 +123,13 @@ const ORIG_NAME: u8 = 0x08; // bit 3 set: original file name present
 const COMMENT: u8 = 0x10; // bit 4 set: file comment present
 const ENCRYPTED: u8 = 0x20; // bit 5 set: file is encrypted
 const RESERVED: u8 = 0xC0; // bits 6 and 7: reserved
+const WSIZE: usize = 0x8000;
 const INBUFSIZ: usize = 0x8000;
-
-const STORED: u8 = 0;
+const OUTBUFSIZ: usize = 16384;
+const INBUF_EXTRA: usize = 64;
+const OUTBUF_EXTRA: usize = 2048;
+const DIST_BUFSIZE: usize = 0x8000;
+const STORED: i32 = 0;
 const COMPRESSED: u8 = 1;
 const PACKED: u8 = 2;
 const LZHED: u8 = 3;
@@ -213,7 +220,9 @@ struct GzipState {
     header_bytes: usize,
     // Function pointer for the current operation
     work: Option<fn(&mut GzipState) -> io::Result<()>>,
-    inbuf: [u8; INBUFSIZ], // Input buffer
+    inbuf: [u8; INBUFSIZ + INBUF_EXTRA], // Input buffer
+    outbuf: [u8; OUTBUFSIZ + OUTBUF_EXTRA], // Output buffer
+    window: [u8; 2 * WSIZE], // Output buffer
     crc16_digest: u32,
     first_time: bool,
     record_io: bool,
@@ -279,7 +288,9 @@ impl GzipState {
             _handled_sig: vec![],
             header_bytes: 0,
             work: None, // Function pointer will be set during runtime
-            inbuf: [0; INBUFSIZ],
+            inbuf: [0; INBUFSIZ + INBUF_EXTRA],
+            outbuf: [0; OUTBUFSIZ + OUTBUF_EXTRA],
+            window: [0; 2 * WSIZE],
             crc16_digest: 0x00000000,
             first_time: false,
             record_io: false,
@@ -1600,9 +1611,9 @@ fn unlzh(_state: &mut GzipState) -> io::Result<()> {
     unimplemented!()
 }
 
-fn unzip(_state: &mut GzipState) -> io::Result<()> {
-    unimplemented!()
-}
+// fn unzip(_state: &mut GzipState) -> io::Result<()> {
+//     unimplemented!()
+// }
 
 fn copy(_state: &mut GzipState) -> io::Result<()> {
     unimplemented!()
