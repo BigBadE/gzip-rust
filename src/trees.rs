@@ -55,8 +55,8 @@ const BL_ORDER: [usize; BL_CODES] = [
     14, 1, 15,
 ];
 
-#[derive(Default, Copy, Clone)]
-struct CtData {
+#[derive(Default, Copy, Clone, Debug)]
+pub struct CtData {
     freq: u16,
     len: u16,
     code: u16,
@@ -64,38 +64,38 @@ struct CtData {
 }
 
 pub struct Trees<'a> {
-    file_type: Option<&'a mut u16>,
-    file_method: i32,
-    compressed_len: u64,
-    input_len: u64,
-    base_length: [i32; LENGTH_CODES],
-    base_dist: [i32; D_CODES],
-    length_code: [u8; 256],
-    dist_code: [u8; 512],
-    bl_count: [i32; MAX_BITS + 1],
-    static_ltree: Rc<RefCell<Vec<CtData>>>,
-    static_dtree: Rc<RefCell<Vec<CtData>>>,
-    bltree: Rc<RefCell<Vec<CtData>>>,
-    dyn_ltree: Rc<RefCell<Vec<CtData>>>,
-    dyn_dtree: Rc<RefCell<Vec<CtData>>>,
-    bl_tree: Box<[CtData; 2 * BL_CODES + 1]>,
-    opt_len: u64,
-    static_len: u64,
-    last_lit: i32,
-    last_dist: i32,
-    last_flags: i32,
-    flags: i32,
-    flag_bit: i32,
-    l_buf: Box<[usize; LIT_BUFSIZE]>,
-    d_buf: Box<[usize; DIST_BUFSIZE]>,
-    flag_buf: Box<[usize; LIT_BUFSIZE/8]>,
-    l_desc: TreeDesc<'a>,
-    d_desc: TreeDesc<'a>,
-    bl_desc: TreeDesc<'a>,
-    heap: [i32; 2*L_CODES+1],
-    depth: [i32; 2*L_CODES+1],
-    heap_len: usize,
-    heap_max: usize
+    pub file_type: Option<&'a mut u16>,
+    pub file_method: i32,
+    pub compressed_len: u64,
+    pub input_len: u64,
+    pub base_length: [i32; LENGTH_CODES],
+    pub base_dist: [i32; D_CODES],
+    pub length_code: [u8; 256],
+    pub dist_code: [u8; 512],
+    pub bl_count: [i32; MAX_BITS + 1],
+    pub static_ltree: Rc<RefCell<Vec<CtData>>>,
+    pub static_dtree: Rc<RefCell<Vec<CtData>>>,
+    pub bltree: Rc<RefCell<Vec<CtData>>>,
+    pub dyn_ltree: Rc<RefCell<Vec<CtData>>>,
+    pub dyn_dtree: Rc<RefCell<Vec<CtData>>>,
+    pub bl_tree: Box<[CtData; 2 * BL_CODES + 1]>,
+    pub opt_len: u64,
+    pub static_len: u64,
+    pub last_lit: i32,
+    pub last_dist: i32,
+    pub last_flags: i32,
+    pub flags: i32,
+    pub flag_bit: i32,
+    pub l_buf: Box<[usize; LIT_BUFSIZE]>,
+    pub d_buf: Box<[usize; DIST_BUFSIZE]>,
+    pub flag_buf: Box<[usize; LIT_BUFSIZE/8]>,
+    pub l_desc: TreeDesc<'a>,
+    pub d_desc: TreeDesc<'a>,
+    pub bl_desc: TreeDesc<'a>,
+    pub heap: [i32; 2*L_CODES+1],
+    pub depth: [i32; 2*L_CODES+1],
+    pub heap_len: usize,
+    pub heap_max: usize
 }
 
 #[derive(Clone)]
@@ -809,9 +809,7 @@ impl<'a> Trees<'a> {
             self.depth[new_node] = 0;
             self.opt_len = self.opt_len.wrapping_sub(1);
             if let Some(stree) = stree {
-                if self.static_len > 0 {
-                    self.static_len = self.static_len.wrapping_sub(stree.borrow()[new_node].len as u64);
-                }
+                self.static_len = self.static_len.wrapping_sub(stree.borrow()[new_node].len as u64);
             }
             // new_node is 0 or 1, so it does not have extra bits
         }

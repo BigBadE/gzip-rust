@@ -16,7 +16,10 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 use std::{env, fs, io};
-use std::os::unix::fs::MetadataExt;
+use ::deflate::{checksum, deflate_bytes, Compression, CompressionOptions};
+use ::deflate::compress::Flush;
+use ::deflate::deflate_state::DeflateState;
+use ::deflate::writer::compress_until_done;
 
 // Constants (Assumed values for any not defined in the provided C code)
 const BITS: i32 = 16; // Assuming 16 bits
@@ -1641,11 +1644,9 @@ fn crc32b(c: u32, data: u8) -> u32 {
     crc
 }
 
-
-
 fn main() -> io::Result<()> {
     let mut state = GzipState::new();
-
+    
     // Parse command-line arguments
     state.parse_args();
 

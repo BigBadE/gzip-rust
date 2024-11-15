@@ -3,6 +3,12 @@
 version = 3
 
 [[package]]
+name = "adler32"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aae1277d39aeec15cb388266ecc24b11c80469deae6067e17a1a7aa9e5c1f234"
+
+[[package]]
 name = "android-tzdata"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -103,6 +109,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19d374276b40fb8bbdee95aef7c7fa6b5316ec764510eb64b8dd0e2ed0d7e7f5"
 
 [[package]]
+name = "deflate"
+version = "1.0.0"
+dependencies = [
+ "adler32",
+]
+
+[[package]]
 name = "filetime"
 version = "0.2.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -122,6 +135,7 @@ dependencies = [
  "byteorder",
  "chrono",
  "crc",
+ "deflate",
  "filetime",
 ]
 
