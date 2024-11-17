@@ -6,37 +6,58 @@ use crate::{OK, ERROR, STORED, WSIZE, INBUFSIZ};
 use std::io::{stdout, Read, Write, Cursor};
 
 #[derive(Debug)]
-#[derive(Clone)] // 自动为 Huft 实现 Clone 特性
+#[derive(Clone)]
 struct Huft {
-    v: Box<Option<Box<Huft>>>, // Pointer to next level of table or value
+    v: HuftValue, // Pointer to next level of table or value
     e: u8, // Extra bits for the current table
     b: u8, // Number of bits for this code or subcode
 }
 
+#[derive(Debug)]
+#[derive(Clone)]
 enum HuftValue {
-    N(u16),         // literal, length base, or distance base
-    T(Box<Huft>),   // pointer to next level of table
+    N(u16),          // Literal, length base, or distance base
+    T(Box<[Huft]>),  // Pointer to a fixed-size array (dynamic allocation)
+}
+
+impl Default for HuftValue {
+    fn default() -> Self {
+        HuftValue::N(0)
+    }
 }
 
 impl Default for Huft {
     fn default() -> Self {
         Huft {
-            v: Box::new(None),  // 假设 Value::N 是一个枚举类型，可以用一个默认值
-            b: 0,             // u8 的默认值是 0
-            e: 0,             // u8 的默认值是 0
+            v: HuftValue::default(),
+            e: 0,
+            b: 0,
         }
     }
 }
 
-
-
-fn huft_free(t: Option<Box<Huft>>) -> i32 {
-    let mut p = t;
-    while let Some(mut q) = p {
-        p = q.v.take();
+fn huft_free(t: Option<&Huft>) -> usize {
+    if let Some(huft) = t {
+        match &huft.v {
+            HuftValue::T(sub_table) => {
+                // 遍历子表并递归计算释放的节点数量
+                sub_table.iter().map(|sub_huft| huft_free(Some(sub_huft))).sum::<usize>() + 1
+            }
+            HuftValue::N(_) => 1, // 叶子节点直接返回 1
+        }
+    } else {
+        0 // None 时返回 0
     }
-    0
 }
+
+
+fn find_huft_entry(current: &Huft, index: usize) -> Option<&Huft> {
+    match &current.v {
+        HuftValue::T(sub_table) => sub_table.get(index),
+        HuftValue::N(_) => None,
+    }
+}
+
 
 // Order of the bit length code lengths
 static border: [u16; 19] = [
@@ -183,7 +204,7 @@ impl Inflate {
             state.inptr += 1;                // Increment the pointer
             Ok(byte)
         } else {
-            let mut input = Cursor::new(vec![0; 1]); // 创建一个空输入流
+            let mut input = Cursor::new(vec![0; 1]);
             Ok(self.fill_inbuf(&mut input, true, state)?)
         }
     }
@@ -195,7 +216,7 @@ impl Inflate {
             state.inptr += 1;                // Increment the pointer
             Ok(byte)
         } else {
-            let mut input = Cursor::new(vec![1; 1]); // 创建一个空输入流
+            let mut input = Cursor::new(vec![1; 1]);
             Ok(self.fill_inbuf(&mut input, true, state)?)
         }
     }
@@ -208,7 +229,7 @@ impl Inflate {
             Ok(byte)
         } else {
             self.wp = w; // This part needs clarification based on your code
-            let mut input = Cursor::new(vec![0; 1]); // 创建一个空输入流
+            let mut input = Cursor::new(vec![0; 1]);
             self.fill_inbuf(&mut input, true, state)?;
             Ok(0) // Placeholder, adjust logic as per the context
         }
@@ -220,318 +241,309 @@ impl Inflate {
     }
 
     // Equivalent to the NEEDBITS macro (requiring more information to be fully accurate)
-    pub fn need_bits(&mut self, state: &mut GzipState,k: &mut u32, b: &mut u32, n: u32, w: usize)-> (u32, u32)  {
+    pub fn need_bits(&mut self, state: &mut GzipState,k: &mut u32, b: &mut u32, n: u32, w: usize)  {
         while *k < n {
                 let byte = match self.next_byte(state, w) {
-                    Ok(value) => value, // 解包成功
-                    Err(_) => {
-                        // 处理错误，例如记录日志或返回默认值
-                        return (0, 0);
-                    }
+                    Ok(value) => value, Err(_) => todo!(),
                 };
                 *b |= (u32::from(byte)) << *k;
 
                 *k += 8;
             }
-            (*k, *b)
     }
 
     // Equivalent to DUMPBITS macro
-    pub fn dump_bits(&mut self, k: &mut u32, b: &mut u32, n: u32)-> (u32, u32)  {
-        let updated_b = *b >> n;
-        let updated_k = *k - n;
-        (updated_k, updated_b)
+    pub fn dump_bits(&mut self, k: &mut u32, b: &mut u32, n: u32)  {
+        *b = *b >> n;
+        *k = *k - n;
     }
 
     // Function to build the Huffman tree
     pub fn huft_build(
         &mut self,
-        b: &[u8],          // 代码长度表 (b 的长度 <= BMAX)
-        mut n: usize,           // 代码数目 (n <= N_MAX)
-        s: u16,             // 简单值代码的数目 (0..s-1)
-        d: &[u16],          // 非简单代码的基值
-        e: &[u16],          // 非简单代码的额外位数
-        t: &mut Vec<Option<Box<Huft>>>, // 表的结果
-        m: &mut u16,        // 最大查找位数
+        b: &[u32],   // Code lengths in bits
+        n: usize,    // Number of codes
+        s: usize,    // Number of simple-valued codes (0..s-1)
+        d: &[u16],   // List of base values for non-simple codes
+        e: &[u16],   // List of extra bits for non-simple codes
+        t: &mut Option<Box<Huft>>, // Result: starting table
+        m: &mut i32, // Maximum lookup bits, returns actual
     ) -> u32 {
-        let mut c = vec![0; (BMAX + 1).try_into().unwrap()]; // Bit length count table
-        let mut v = vec![0; N_MAX.try_into().unwrap()]; // Values in order of bit length
-        let mut x = vec![0; (BMAX + 1).try_into().unwrap()]; // Bit offsets, then code stack
+        let mut c = [0u32; BMAX as usize + 1];
+        let mut x = [0u32; BMAX as usize + 1];
+        let mut v = [0u32; N_MAX as usize];
+        let mut u: Vec<Box<[Huft]>> = Vec::new(); // Replace linked list with dynamic array
 
+        let mut a;
+        let mut f: u32;
+        let mut g: u32;
+        let mut h: i32 = -1;
         let mut l = *m;
-        let mut k = 0; // Minimum code length
-        let mut g = 0; // Maximum code length
-        let mut w = 0; // Bits decoded (w = l * h)
-        let mut h: i32 = -1; // No tables yet—level -1
-        let mut y = 0; // Number of dummy codes added
-        let mut z = 0; // Number of entries in current table
-        let mut a = 0; // Counter for codes of length k
+        let mut w = 0;
 
         // Generate counts for each bit length
-        for &len in b {
-            c[len as usize] += 1;
+        for &bit in b.iter().take(n) {
+            c[bit as usize] += 1;
         }
 
-        if c[0] == n { // Null input—all zero length codes
-            let mut q = vec![
-                Huft {
-                    v: Box::new(None),
-                    e: 99,
-                    b: 1,
-                },
-                Huft {
-                    v: Box::new(None),
-                    e: 99,
-                    b: 1,
-                },
-            ];
-
-            *t = vec![Some(Box::new(q[1].clone()))];
+        if c[0] == n as u32 {
+            *t = Some(Box::new(Huft {
+                v: HuftValue::T(Box::new([])),
+                e: 99,
+                b: 1,
+            }));
             *m = 1;
             return 0;
         }
 
-        // Find minimum and maximum length, bound *m by those
-        for j in 1..=BMAX {
-            if c[j as usize] > 0 {
-                k = j;
-                break;
-            }
-        }
-        if l < k as u16 {
-            l = k as u16;
-        }
-
-        for i in (1..=BMAX).rev() {
-            if c[i as usize] > 0 {
-                g = i;
-                break;
-            }
-        }
-
-        if l > g as u16 {
-            l = g as u16;
-        }
+        // Find minimum and maximum length
+        let mut k = c.iter().position(|&x| x != 0).unwrap_or(0) as i32;
+        g = (1..=BMAX).rev().find(|&x| c[x as usize] != 0).unwrap_or(0) as u32 ;
+        l = l.clamp(k, g as i32);
         *m = l;
 
-        // Adjust last length count to fill out codes if needed
-        let mut y_val = 1 << k;
-        for j in k..g {
-            y_val -= c[j as usize];
-            if y_val < 0 {
-                return 2; // Bad input: more codes than bits
+        // Adjust last length count
+        let mut y = 1 << k;
+        for j in k..g as i32 {
+            y -= c[j as usize];
+            if y < 0 {
+                return 2;
             }
+            y <<= 1;
         }
-        y_val -= c[g as usize];
-        if y_val < 0 {
+
+        y -= c[g as usize];
+        if y < 0 {
             return 2;
         }
-        c[g as usize] += y_val;
+        c[g as usize] += y;
 
-        // Generate starting offsets into the value table for each length
-        x[1] = k as u32;
-        for i in (2..=g).rev() {
-            x[i as usize] = x[(i - 1) as usize] + c[(i - 1) as usize] as u32;
+        // Generate starting offsets
+        let mut j = 0;
+        for i in 1..=BMAX {
+            x[i as usize] = j;
+            j += c[i as usize] as u32;
         }
 
-        // Make a table of values in order of bit lengths
-        let mut i = 0;
-        for &len in b {
-            if len != 0 {
-                v[x[len as usize] as usize] = i;
-                x[len as usize] += 1;
+        // Populate values array
+        for (i, &bit) in b.iter().enumerate().take(n) {
+            if bit != 0 {
+                v[x[bit as usize] as usize] = i as u32;
+                x[bit as usize] += 1;
             }
-            i += 1;
         }
 
-        n = x[g as usize] as usize; // Set n to length of v
+        let n = x[g as usize] as usize;
 
+        // Generate Huffman codes and build tables
+        x[0] = 0;
+        let mut p = v.iter();
+        let mut z = 0;
 
-        // Generate the Huffman codes and for each, make the table entries
-        x[0] = 0; // First Huffman code is zero
-        let mut p = v.iter().cloned();
-        h = -1;
-        w = -(l as i32); // Bits decoded = (l * h)
-
-        let mut u: Vec<*mut Huft> = vec![null_mut(); BMAX.try_into().unwrap()];
-        let mut q = vec![];
-
-        // Go through the bit lengths (k already is bits in shortest code)
-        for k in k..=g {
+        for k in k..=g as i32 {
             a = c[k as usize];
             while a > 0 {
-                // Make tables up to required level
-                while k > w + l as i32 {
+                while k > w + l {
                     h += 1;
-                    w += l as i32; // Previous table always l bits
+                    w += l;
 
-                    // Compute minimum size table less than or equal to l bits
-                    z = (g - w) as u32;
-                    let f = 1 << (k - w);
-                    if f > a + 1 {
-                        let mut f1 = f - a - 1;
-                        let mut j = k - w;
-                        while j < z as i32 {
-                            if f1 <= c[j as usize] {
-                                break;
-                            }
-                            f1 -= c[j as usize];
-                        }
-                    }
+                    let z = (g - w as u32).clamp(1, l as u32) as usize;
+                    let f = 1 << z;
 
-                    z = 1 << (k - w);
-                    if q.len() == 0 {
-                        q.push(Huft {
-                            v: Box::new(None),
-                            e: 0,
-                            b: 0,
-                        });
-                    }
+                    // Allocate subtable as an array
+                    let subtable = vec![Huft::default(); f].into_boxed_slice();
+                    u.push(subtable);
                 }
 
-                // Set up table entry in r
-                let mut r = Huft {
-                    v: Box::new(None),
-                    e: 0,
-                    b: 0,
-                };
+                let mut r = Huft::default();
                 r.b = (k - w) as u8;
-                if p.clone().count() >= n {
-                    r.e = 99; // Out of values—invalid code
-                } else if p.clone().next().unwrap() < s {
-                    r.e = if p.clone().next().unwrap() < 256 {
-                        16
+
+                if let Some(&val) = p.next() {
+                    if val < s as u32 {
+                        r.e = if val < 256 { 16 } else { 15 };
+                        r.v = HuftValue::N(val as u16);
                     } else {
-                        15
-                    }; // Simple code
+                        r.e = e[val as usize - s] as u8;
+                        r.v = HuftValue::N(d[val as usize - s]);
+                    }
                 } else {
-                    r.e = e[p.clone().next().unwrap() as usize - s as usize] as u8;
-                    r.v = Box::new(Some(Box::new(Huft { v: Box::new(None), e: 0, b: 0 })));
+                    r.e = 99;
                 }
 
-                for i in 0..z as u32 {
-                    q[i as usize] = r.clone();
+                let mut f = 1 << (k - w);
+                let base_index = x[(k - w) as usize] as usize;
+
+                if let Some(subtable) = u.last_mut() {
+                    for i in 0..f {
+                        subtable[base_index + i] = r.clone();
+                    }
                 }
 
-                // Backwards increment the k-bit code i
-                let mut j = 1 << (k - 1);
-                i ^= j;
-                i ^= j;
-
-                while u32::from(i & ((1 << w) - 1)) != x[h as usize] {
-                    h -= 1;
-                    w -= l as i32;
-                }
+                a -= 1;
             }
         }
 
-        return if y != 0 && g != 1 { 1 } else { 0 };
+        // Set result table
+        if let Some(subtable) = u.pop() {
+            *t = Some(Box::new(Huft {
+                v: HuftValue::T(subtable),
+                e: 0,
+                b: 0,
+            }));
+        }
+
+        (y != 0 && g != 1) as u32
     }
 
     // Function to inflate coded data
     pub fn inflate_codes(
         &mut self,
         state: &mut GzipState,
-        tl: &mut Vec<Option<Box<Huft>>>, // literal/length code table
-        td: &mut Vec<Option<Box<Huft>>>, // distance code table
-        bl: i32,                    // lookup bits for tl
-        bd: i32                     // lookup bits for td
+        tl: &Option<Box<Huft>>, // Literal/length table
+        td: &Option<Box<Huft>>, // Distance table
+        bl: i32,                // Number of bits for literal/length table
+        bd: i32,                // Number of bits for distance table
     ) -> i32 {
-        let mut e: u32;  // Table entry flag/number of extra bits
-        let mut n: u32;  // Length and index for copy
-        let mut d: u32;  // Distance for copy
-        let mut w: usize = self.wp;  // Current window position
-        let mut t: &mut Huft;  // Pointer to table entry
-        let mut ml: u32;  // Mask for bl bits
-        let mut md: u32;  // Mask for bd bits
-        let mut b: u32 = self.bb;  // Bit buffer
-        let mut k: u32 = self.bk;  // Number of bits in bit buffer
+        let mut b = self.bb; // Bit buffer
+        let mut k = self.bk; // Number of bits in bit buffer
+        let mut w = self.wp; // Current window position
 
-        // Make local copies of globals
-        ml = mask_bits[bl as usize];
-        md = mask_bits[bd as usize];
+        let ml = mask_bits[bl as usize]; // Mask for `bl` bits
+        let md = mask_bits[bd as usize]; // Mask for `bd` bits
 
         loop {
-            // Simulate NEEDBITS
+            // Get a literal/length code
             self.need_bits(state, &mut k, &mut b, bl as u32, w);
+            let index = (b & ml) as usize;
 
-            // Look up the table entry
-            e = tl[(b & ml) as usize].clone().unwrap().e as u32;
-
-            if e > 16 {
-                while e > 16 {
-                    if e == 99 {
-                        return 1; // Error code for invalid input
-                    }
-
-                    // Simulate DUMPBITS
-                    let tl_entry = td[(b & ml) as usize].clone().unwrap();
-                    self.dump_bits(&mut k, &mut b, tl_entry.b as u32);
-                    e -= 16;
-
-                    // Simulate NEEDBITS
-                    self.need_bits(state, &mut k, &mut b, e as u32, w);
-                }
+            // Traverse the literal/length table
+            let mut t = match tl {
+                Some(t) => &**t,
+                None => return 2,
+            };
+            while let HuftValue::T(ref table) = t.v {
+                t = &table[index];
             }
 
-            // Simulate DUMPBITS
-            let tl_entry = td[(b & ml) as usize].clone().unwrap();
-            self.dump_bits(&mut k, &mut b, tl_entry.b as u32);
+            let mut e = t.e;
+            while e > 16 {
+                if e == 99 {
+                    return 1; // Invalid code
+                }
+                self.dump_bits(&mut k, &mut b, t.b as u32);
+                e -= 16;
 
-            if e == 16 { // Literal
-                self.slide[w] = tl[(b & ml) as usize].clone().unwrap().v.as_ref().clone().unwrap().e;
+                self.need_bits(state, &mut k, &mut b, e as u32, w);
+                let index = (b & mask_bits[e as usize]) as usize;
+
+                if let HuftValue::T(ref table) = t.v {
+                    t = &table[index];
+                } else {
+                    return 2; // Invalid structure
+                }
+                e = t.e;
+            }
+
+            self.dump_bits(&mut k, &mut b, t.b as u32);
+
+            if e == 16 {
+                // Literal
+                let n = match t.v {
+                    HuftValue::N(n) => n as usize,
+                    _ => panic!("Expected HuftValue::N, but found HuftValue::T"),
+                };
+                self.slide[w] = n as u8;
+                w += 1;
                 if w == WSIZE {
-                    self.flush_output(state, w); // Mock flush output
+                    self.flush_output(state, w);
                     w = 0;
                 }
-                w += 1;
-            } else { // EOB or length
+            } else {
+                // End of block or length
                 if e == 15 {
                     break; // End of block
                 }
 
-                // Get the length of block to copy
+                // Get length of block to copy
                 self.need_bits(state, &mut k, &mut b, e as u32, w);
-                n = tl[(b & ml) as usize].clone().unwrap().v.as_ref().clone().unwrap().e as u32 + (b & mask_bits[e as usize]);
+                let mut n = match t.v {
+                    HuftValue::N(n) => n as usize + (b & mask_bits[e as usize]) as usize,
+                    _ => panic!("Expected HuftValue::N, but found HuftValue::T"),
+                };
                 self.dump_bits(&mut k, &mut b, e as u32);
 
-                // Decode the distance of block to copy
+                // Get distance of block to copy
                 self.need_bits(state, &mut k, &mut b, bd as u32, w);
+                let index = (b & md) as usize;
 
-                e = td[(b & md) as usize].clone().unwrap().e as u32;
-                if e > 16 {
-                    while e > 16 {
-                        if e == 99 {
-                            return 1; // Error code for invalid input
-                        }
-                        let tl_entry = td[(b & md) as usize].clone().unwrap();
-                        self.dump_bits(&mut k, &mut b, tl_entry.b as u32);
-                        e -= 16;
-                        self.need_bits(state, &mut k, &mut b, e as u32, w);
-                    }
+                // Traverse the distance table
+                let mut t = match td {
+                    Some(t) => &**t,
+                    None => return 2,
+                };
+                while let HuftValue::T(ref table) = t.v {
+                    t = &table[index];
                 }
-                // 首先使用 b 计算索引，再将 b 的可变引用传递给 dump_bits
-                let tl_entry = td[(b & md) as usize].clone().unwrap(); // 先使用 b 计算索引，得到 tl_entry
-                self.dump_bits(&mut k, &mut b, tl_entry.b as u32);
+
+                let mut e = t.e;
+                while e > 16 {
+                    if e == 99 {
+                        return 1; // Invalid code
+                    }
+                    self.dump_bits(&mut k, &mut b, t.b as u32);
+                    e -= 16;
+
+                    self.need_bits(state, &mut k, &mut b, e as u32, w);
+                    let index = (b & mask_bits[e as usize]) as usize;
+
+                    if let HuftValue::T(ref table) = t.v {
+                        t = &table[index];
+                    } else {
+                        return 2; // Invalid structure
+                    }
+                    e = t.e;
+                }
+
+                self.dump_bits(&mut k, &mut b, t.b as u32);
 
                 self.need_bits(state, &mut k, &mut b, e as u32, w);
-                d = w as u32 - td[(b & md) as usize].clone().unwrap().v.as_ref().clone().unwrap().e as u32 - (b & mask_bits[e as usize]);
+                let mut d = match t.v {
+                    HuftValue::N(n) => w as isize - n as isize - (b & mask_bits[e as usize]) as isize,
+                    _ => panic!("Expected HuftValue::N, but found HuftValue::T"),
+                };
                 self.dump_bits(&mut k, &mut b, e as u32);
 
-                // Copy the data
-                loop {
-                    n -= if n < e { n } else { e };
-                    if n == 0 {
-                        break;
+                // Copy block
+                while n > 0 {
+                    let e = (if d >= 0 {
+                        WSIZE - d as usize
+                    } else {
+                        w - d as usize
+                    })
+                    .min(n);
+
+                    if d >= 0 && d + e as isize <= w as isize {
+                        self.slide.copy_within(d as usize..d as usize + e, w);
+                        w += e;
+                        d += e as isize;
+                    } else {
+                        for _ in 0..e {
+                            self.slide[w] = self.slide[d as usize];
+                            w += 1;
+                            d += 1;
+                        }
                     }
-                    self.slide[w] = self.slide[d as usize];
-                    w += 1;
-                    d += 1;
+                    n -= e;
+
+                    if w == WSIZE {
+                        self.flush_output(state, w);
+                        w = 0;
+                    }
                 }
             }
         }
 
-        // Restore globals from locals
+        // Restore globals
         self.wp = w;
         self.bb = b;
         self.bk = k;
@@ -590,14 +602,13 @@ impl Inflate {
 
     // Decompress an inflated type 1 (fixed Huffman codes) block
     pub fn inflate_fixed(&mut self, state: &mut GzipState) -> i32 {
-        let mut i: usize;               // temporary variable
-        let mut tl: Vec<Option<Box<Huft>>> = vec![];
-        let mut td: Vec<Option<Box<Huft>>> = vec![];
-        let mut bl: u16;                 // lookup bits for tl
-        let mut bd: u16;                 // lookup bits for td
-        let mut l: [u8; 288] = [0; 288]; // length list for huft_build
+        let mut tl: Option<Box<Huft>> = None; // Literal/length table
+        let mut td: Option<Box<Huft>> = None; // Distance table
+        let mut bl: i32 = 7;                 // Lookup bits for `tl`
+        let mut bd: i32 = 5;                 // Lookup bits for `td`
+        let mut l = [0u32; 288];             // Length list for `huft_build`
 
-        // set up literal table
+        // Set up literal table
         for i in 0..144 {
             l[i] = 8;
         }
@@ -607,238 +618,326 @@ impl Inflate {
         for i in 256..280 {
             l[i] = 7;
         }
-        for i in 280..288 {             // make a complete, but wrong code set
+        for i in 280..288 {
             l[i] = 8;
         }
-        bl = 7;
 
         // Call huft_build for literal/length table
-        let i = self.huft_build(&l, 288, 257, &cpdist, &cpdext, &mut tl, &mut bl);
-        if i != 0 {
-            return i.try_into().unwrap();
+        let result = self.huft_build(&l, 288, 257, &cplens, &cplext, &mut tl, &mut bl);
+        if result != 0 {
+            return result as i32;
         }
 
-        // set up distance table
-        for i in 0..30 {                // make an incomplete code set
+        // Set up distance table
+        let mut l = [0u32; 30]; // Length list for distance table
+        for i in 0..30 {
             l[i] = 5;
         }
-        bd = 5;
 
         // Call huft_build for distance table
-        let i = self.huft_build(&l, 30, 0, &cpdist, &cpdext, &mut td, &mut bd);
-        if i > 1 {
-            for entry in tl {
-                huft_free(entry);  // 对每个 Option<Box<Huft>> 调用 huft_free
+        let result = self.huft_build(&l, 30, 0, &cpdist, &cpdext, &mut td, &mut bd);
+        println!("fixed!");
+        if result != 0 {
+            if let Some(ref tl) = tl {
+                huft_free(Some(tl));
             }
-            return i.try_into().unwrap();
+            return result as i32;
         }
 
-        // decompress until an end-of-block code
-        if self.inflate_codes(state, &mut tl, &mut td, bl.into(), bd.into()) != 0 {
+        // Decompress until an end-of-block code
+        if self.inflate_codes(state, &mut tl, &mut td, bl, bd) != 0 {
             return 1;
         }
 
-        // free the decoding tables, return
-        for entry in tl {
-            huft_free(entry);  // 对每个 Option<Box<Huft>> 调用 huft_free
+        // Free the decoding tables
+        if let Some(ref tl) = tl {
+            huft_free(Some(tl));
         }
-        for entry in td {
-            huft_free(entry);  // 对每个 Option<Box<Huft>> 调用 huft_free
+        if let Some(ref td) = td {
+            huft_free(Some(td));
         }
-        return 0;
+
+        0
     }
+
+
 
     // Decompress an inflated type 2 (dynamic Huffman codes) block
     pub fn inflate_dynamic(&mut self, state: &mut GzipState) -> i32 {
-        let mut i: u32;                // temporary variables
-        let mut j: u32;
-        let mut l: u32;                // last length
-        let mut m: u32;                // mask for bit lengths table
-        let mut n: u32;                // number of lengths to get
-        let mut w: u32;                // current window position
-        let mut tl: Vec<Option<Box<Huft>>> = vec![];
-        let mut td: Vec<Option<Box<Huft>>> = vec![];
-        let mut bl: u16;               // lookup bits for tl
-        let mut bd: u16;               // lookup bits for td
-        let mut nb: u32;               // number of bit length codes
-        let mut nl: u32;               // number of literal/length codes
-        let mut nd: u32;               // number of distance codes
-        let mut ll: Vec<u8> = vec![0; 286 + 30];  // literal/length and distance code lengths
-        let mut b: u32;                // bit buffer
-        let mut k: u32;                // number of bits in bit buffer
+        let mut tl: Option<Box<Huft>> = None; // Literal/length table
+        let mut td: Option<Box<Huft>> = None; // Distance table
+        let mut bl: i32 = 7;                 // Lookup bits for `tl`
+        let mut bd: i32 = 5;                 // Lookup bits for `td`
+        let mut b = self.bb;                 // Bit buffer
+        let mut k = self.bk;                 // Number of bits in the bit buffer
+        let mut w = self.wp as u32;          // Current window position
 
-        // make local bit buffer
-        b = self.bb;
-        k = self.bk;
-        w = self.wp as u32;
-
-        // read in table lengths
-        self.need_bits(state, &mut k, &mut b, 5, w.try_into().unwrap());
-        nl = 257 + (b & 0x1f);      // number of literal/length codes
+        // Read table lengths
+        self.need_bits(state, &mut k, &mut b, 5, w as usize);
+        let nl = 257 + (b & 0x1f); // Number of literal/length codes
         self.dump_bits(&mut k, &mut b, 5);
-        self.need_bits(state, &mut k, &mut b, 5, w.try_into().unwrap());
-        nd = 1 + (b & 0x1f);        // number of distance codes
+        self.need_bits(state, &mut k, &mut b, 5, w as usize);
+        let nd = 1 + (b & 0x1f);   // Number of distance codes
         self.dump_bits(&mut k, &mut b, 5);
-        self.need_bits(state, &mut k, &mut b, 4, w.try_into().unwrap());
-        nb = 4 + (b & 0xf);         // number of bit length codes
+        self.need_bits(state, &mut k, &mut b, 4, w as usize);
+        let nb = 4 + (b & 0xf);    // Number of bit length codes
         self.dump_bits(&mut k, &mut b, 4);
 
-        // Check if the number of codes is valid
-        if (nl > 286 || nd > 30) {
-            return 1;  // bad lengths
+        if nl > 286 || nd > 30 {
+            return 1; // Invalid code lengths
         }
 
-        // read in bit-length-code lengths
+        // Build bit-length table
+        let mut bit_lengths = vec![0u32; 19];
         for j in 0..nb {
-            self.need_bits(state, &mut k, &mut b, 3, w.try_into().unwrap());
-            ll[border[j as usize] as usize] = (b as u8) & 7 ;
+            self.need_bits(state, &mut k, &mut b, 3, w as usize);
+            bit_lengths[border[j as usize] as usize] = b & 7;
             self.dump_bits(&mut k, &mut b, 3);
         }
+
+        // Set remaining lengths to zero
         for j in nb..19 {
-            ll[border[j as usize] as usize] = 0;
+            bit_lengths[border[j as usize] as usize] = 0;
         }
 
-        // build decoding table for trees -- single level, 7 bit lookup
-        bl = 7;
-        i = self.huft_build(&ll, 19, 19, &[], &[], &mut tl, &mut bl);
-        if i != 0 {
-            if i == 1 {
-                for entry in tl {
-                    huft_free(entry);  // 对每个 Option<Box<Huft>> 调用 huft_free
+        // Build the Huffman table for bit-length codes
+        let mut result = self.huft_build(&bit_lengths, 19, 19, &[], &[], &mut tl, &mut bl);
+        if result != 0 {
+            if result == 1 {
+                if let Some(ref tl) = tl {
+                    huft_free(Some(tl));
                 }
             }
-            return i.try_into().unwrap();  // incomplete code set
+            return result as i32;
         }
 
-        if tl.is_empty() {
-            return 2; // Grrrhhh
+        if tl.is_none() {
+            return 2; // Error in tree decoding
         }
 
-        // read in literal and distance code lengths
-        n = nl + nd;
-        m = mask_bits[bl as usize];
-        i = 0;
-        l = 0;
+        // Decode literal/length and distance code lengths
+        let n = nl + nd;
+        let mut literal_lengths = vec![0u32; n as usize];
+        let mut i = 0;
+        let mut l = 0;
+        let mask = mask_bits[bl as usize];
+
         while i < n {
-            self.need_bits(state, &mut k, &mut b, bl.into(), w as usize);
-            let td = &mut tl[(b & m) as usize].as_mut().unwrap();
+            self.need_bits(state, &mut k, &mut b, bl as u32, w as usize);
+            let index = (b & mask) as usize;
 
-            self.dump_bits(&mut k, &mut b, td.b.into());
-            if td.e == 99 {
-                // Invalid code
-                for entry in tl {
-                    huft_free(entry);  // 对每个 Option<Box<Huft>> 调用 huft_free
+            let entry = match tl.as_ref() {
+                Some(table) => {
+                    let mut t = &**table;
+                    while let HuftValue::T(ref subtable) = t.v {
+                        t = &subtable[index];
+                    }
+                    t
                 }
-                return 2;
+                None => return 2,
+            };
+
+            self.dump_bits(&mut k, &mut b, entry.b as u32);
+
+            if entry.e == 99 {
+                if let Some(ref tl) = tl {
+                    huft_free(Some(tl));
+                }
+                return 2; // Invalid code
             }
-            j = td.v.clone().unwrap().v.as_ref().clone().unwrap().e as u32;
-            if j < 16 {              // length of code in bits (0..15)
+
+            let j = match entry.v {
+                HuftValue::N(value) => value as u32,
+                _ => return 2, // Unexpected value type
+            };
+
+            if j < 16 {
                 l = j;
-                ll[i as usize] = l as u8; // save last length in l
-            } else if j == 16 {       // repeat last length 3 to 6 times
-                self.need_bits(state, &mut k, &mut b, 2, w.try_into().unwrap());
-                j = 3 + (b & 3);
+                literal_lengths[i as usize] = l;
+                i += 1;
+            } else if j == 16 {
+                self.need_bits(state, &mut k, &mut b, 2, w as usize);
+                let repeat = 3 + (b & 3);
                 self.dump_bits(&mut k, &mut b, 2);
-                if i + j > n {
-                    return 1;
+                if i + repeat > n {
+                    return 1; // Invalid repeat
                 }
-                while j > 0 {
-                    ll[i as usize] = l as u8;
+                for _ in 0..repeat {
+                    literal_lengths[i as usize] = l;
                     i += 1;
-                    j -= 1;
                 }
-            } else if j == 17 {       // 3 to 10 zero length codes
-                self.need_bits(state, &mut k, &mut b, 3, w.try_into().unwrap());
-                j = 3 + (b & 7);
+            } else if j == 17 {
+                self.need_bits(state, &mut k, &mut b, 3, w as usize);
+                let repeat = 3 + (b & 7);
                 self.dump_bits(&mut k, &mut b, 3);
-                if i + j > n {
-                    return 1;
+                if i + repeat > n {
+                    return 1; // Invalid repeat
                 }
-                while j > 0 {
-                    ll[i as usize] = 0;
+                for _ in 0..repeat {
+                    literal_lengths[i as usize] = 0;
                     i += 1;
-                    j -= 1;
                 }
                 l = 0;
-            } else {                  // j == 18: 11 to 138 zero length codes
-                self.need_bits(state, &mut k, &mut b, 7, w.try_into().unwrap());
-                j = 11 + (b & 0x7f);
+            } else if j == 18 {
+                self.need_bits(state, &mut k, &mut b, 7, w as usize);
+                let repeat = 11 + (b & 0x7f);
                 self.dump_bits(&mut k, &mut b, 7);
-                if i + j > n {
-                    return 1;
+                if i + repeat > n {
+                    return 1; // Invalid repeat
                 }
-                while j > 0 {
-                    ll[i as usize] = 0;
+                for _ in 0..repeat {
+                    literal_lengths[i as usize] = 0;
                     i += 1;
-                    j -= 1;
                 }
                 l = 0;
             }
         }
 
-        // free decoding table for trees
-        for entry in &tl {
-            huft_free(entry.clone());  // 对每个 Option<Box<Huft>> 调用 huft_free
+        // Free the bit-length table
+        if let Some(ref tl) = tl {
+            huft_free(Some(tl));
         }
 
-        // restore the global bit buffer
+        // Restore the global bit buffer
         self.bb = b;
         self.bk = k;
 
-        // build the decoding tables for literal/length and distance codes
-        bl = self.lbits as u16;
-        i = self.huft_build(&ll, nl.try_into().unwrap(), 257, &cpdist, &cpdext, &mut tl, &mut bl);
-        if i != 0 {
-            if i == 1 {
-                eprintln!("incomplete literal tree");
-                for entry in tl {
-                    huft_free(entry);  // 对每个 Option<Box<Huft>> 调用 huft_free
+        // Build literal/length and distance Huffman tables
+        bl = self.lbits;
+        result = self.huft_build(&literal_lengths, nl as usize, 257, &cpdist, &cpdext, &mut tl, &mut bl);
+        if result != 0 {
+            if result == 1 {
+                if let Some(ref tl) = tl {
+                    huft_free(Some(tl));
                 }
             }
-            return i.try_into().unwrap();  // incomplete code set
+            return result as i32;
         }
-        bd = self.dbits as u16;
-        i = self.huft_build(&ll[nl as usize..], nd.try_into().unwrap(), 0, &cpdist, &cpdext, &mut td, &mut bd);
-        if i != 0 {
-            if i == 1 {
-                eprintln!("incomplete distance tree");
-                for entry in td {
-                    huft_free(entry);  // 对每个 Option<Box<Huft>> 调用 huft_free
+
+        bd = self.dbits;
+        result = self.huft_build(
+            &literal_lengths[nl as usize..],
+            nd as usize,
+            0,
+            &cpdist,
+            &cpdext,
+            &mut td,
+            &mut bd,
+        );
+        if result != 0 {
+            if result == 1 {
+                if let Some(ref td) = td {
+                    huft_free(Some(td));
                 }
             }
-            for entry in tl {
-                huft_free(entry);  // 对每个 Option<Box<Huft>> 调用 huft_free
+            if let Some(ref tl) = tl {
+                huft_free(Some(tl));
             }
-            return i.try_into().unwrap();  // incomplete code set
+            return result as i32;
         }
 
-        // decompress until an end-of-block code
-        let err = if self.inflate_codes(state, &mut tl, &mut td, bl.into(), bd.into())>0 { 1 } else { 0 };
+        // Decompress until an end-of-block code
+        println!("dynamic!");
+        let err = if self.inflate_codes(state, &mut tl, &mut td, bl, bd) > 0 {
+            1
+        } else {
+            0
+        };
 
-
-        // free the decoding tables
-        for entry in tl {
-            huft_free(entry);  // 对每个 Option<Box<Huft>> 调用 huft_free
+        // Free decoding tables
+        if let Some(ref tl) = tl {
+            huft_free(Some(tl));
         }
-        for entry in td {
-            huft_free(entry);  // 对每个 Option<Box<Huft>> 调用 huft_free
+        if let Some(ref td) = td {
+            huft_free(Some(td));
         }
-
         err
-
     }
+
+
 
 
     // Decompress an inflated block
     // E is the last block flag
-    pub fn inflate_block(&mut self, e: &mut i32) -> i32 {
-        unimplemented!()
+    pub fn inflate_block(&mut self, e: &mut i32, state: &mut GzipState) -> i32 {
+        let mut t: u32;        // Block type
+        let mut w: u32;        // Current window position
+        let mut b: u32;        // Bit buffer
+        let mut k: u32;        // Number of bits in the bit buffer
+
+        // Initialize local variables
+        b = self.bb;
+        k = self.bk;
+        w = self.wp as u32;
+
+        // Read the last block bit
+        self.need_bits(state, &mut k, &mut b, 1, w.try_into().unwrap());
+        *e = (b & 1) as i32;
+        self.dump_bits(&mut k, &mut b, 1);
+
+        // Read the block type
+        self.need_bits(state, &mut k, &mut b, 2, w.try_into().unwrap());
+        t = (b & 3) as u32;
+        self.dump_bits(&mut k, &mut b, 2);
+
+        // Restore the global bit buffer
+        self.bb = b;
+        self.bk = k;
+
+        // Decompress based on the block type
+        match t {
+            2 => return self.inflate_dynamic(state),
+            0 => return self.inflate_stored(state),
+            1 => return self.inflate_fixed(state),
+            _ => return 2, // Invalid block type
+        }
     }
 
 
     // Decompress an inflated entry
     pub fn inflate(&mut self, state: &mut GzipState) -> i32 {
-        unimplemented!()
+        let mut e: i32 = 42; // Last block flag
+        let mut r: i32; // Result code
+        let mut h: u32; // Maximum number of `huft` structures allocated
+
+        // Initialize the window and bit buffer
+        self.wp = 0; // Current window position
+        self.bk = 0; // Number of bits in the bit buffer
+        self.bb = 0; // Bit buffer
+
+        // Decompress until the last block
+        h = 0;
+        loop {
+            self.hufts = 0; // Initialize `hufts`
+
+            r = self.inflate_block(&mut e, state);
+            if r != 0 {
+                return r; // Return the error code
+            }
+
+            if self.hufts > h {
+                h = self.hufts; // Update the maximum `hufts`
+            }
+
+            if e != 0 {
+                break; // Exit the loop if this is the last block
+            }
+        }
+
+        // Undo excess pre-reading. The next read will be byte-aligned,
+        // so discard unused bits from the last meaningful byte.
+
+        while self.bk >= 8 {
+            self.bk -= 8;
+            state.inptr -= 1; // Assume `inptr` is a global variable pointing to the input buffer
+        }
+
+        // Flush the output window
+        self.flush_output(state, self.wp); // Assume `flush_output` is a function that writes decompressed data to the output
+
+        // Return success status
+        println!("{}", format!("<{}> ", h)); // Assume `trace` is a debugging output function
+        0
     }
 }
 
