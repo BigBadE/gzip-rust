@@ -129,7 +129,7 @@ echo "Testing no name mode"
 compare_gzip_outputs -k -n -1 tests/test-word.txt
 
 echo "Testing large arg combinations"
-compare_gzip_outputs -kab3qn1 tests/test-word.txt
+compare_gzip_outputs -k -a -b 3 -q -n -1 tests/test-word.txt
 
 echo "Testing recursive"
 compare_gzip_outputs -r -k -1 tests/testing
