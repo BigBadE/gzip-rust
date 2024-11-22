@@ -9,4 +9,3 @@ atty = "0.2.14"
 crc = "3.2.1"
 byteorder = "1.4.3"
 chrono = "0.4.38"
-deflate = { path = "../deflate-rs" }
