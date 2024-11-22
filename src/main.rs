@@ -19,10 +19,6 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 use std::{env, fs, io};
-use ::deflate::{checksum, deflate_bytes, Compression, CompressionOptions};
-use ::deflate::compress::Flush;
-use ::deflate::deflate_state::DeflateState;
-use ::deflate::writer::compress_until_done;
 
 // Constants (Assumed values for any not defined in the provided C code)
 const BITS: i32 = 16; // Assuming 16 bits
