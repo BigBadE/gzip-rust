@@ -32,8 +32,7 @@ The program passes 2 out of the 3 current integration tests, failing on empty fi
 
 ### Current Results
 
-- **Total Lines of Code**: 1311 LOC
-- **Compilation Accuracy**: (TBD, needs further testing)
+- **Current Tests Passed**: 24 Tests
 - **Manual Fixes**:
     - Simple errors (basic type mismatches): 75 lines
     - Advanced errors (logical or structural issues): 63 lines

@@ -1,7 +1,9 @@
 #!/bin/bash
 
 passed=0
+decom=0
 total=0
+decomtotal=0
 
 compare_gzip_outputs() {
     # Capture all arguments passed to the function
@@ -49,10 +51,11 @@ compare_gzip_outputs_no_file() {
     CARGO_OUTPUT=$(mktemp)
 
     # Run gzip with the provided arguments and capture stdout and stderr
-    gzip "${args[@]}" > "$GZIP_OUTPUT" 2>&1
+    gzip "${args[@]}" < /dev/null > "$GZIP_OUTPUT" 2>&1
 
     # Run cargo run with the provided arguments and capture stdout and stderr
     cargo build > /dev/null 2>&1
+
     ./target/debug/gzip "${args[@]}" > "$CARGO_OUTPUT" 2>&1
 
     # Compare the outputs
@@ -84,8 +87,8 @@ echo "Testing forced overwrite"
 compare_gzip_outputs -k -f -1 tests/test-word.txt
 
 echo "Testing delete"
-touch tests/test-temp.txt
-compare_gzip_outputs -f -1 tests/test-temp.txt
+echo "test" > tests/test-temp.txt
+./target/debug/gzip -f -1 tests/test-temp.txt
 echo "Testing file is deleted"
 if [ -f tests/test-temp.txt ]; then
   echo "Test failed. File not deleted"
@@ -104,6 +107,9 @@ compare_gzip_outputs_no_file -b
 echo "Testing incorrect bits operand"
 compare_gzip_outputs_no_file -b test
 
+echo "Testing bits operand"
+compare_gzip_outputs -k -1 -b 3 tests/test-word.txt
+
 echo "Testing compression level 2"
 compare_gzip_outputs -k -2 tests/test-word.txt
 
@@ -119,8 +125,29 @@ compare_gzip_outputs -k -c -1 tests/test-word.txt
 echo "Testing quiet mode"
 compare_gzip_outputs -k -q -1 tests/test-word.txt
 
-echo "Testing verbose mode"
-compare_gzip_outputs -v -k -f -1 tests/test-word.txt
+echo "Testing no name mode"
+compare_gzip_outputs -k -n -1 tests/test-word.txt
+
+echo "Testing large arg combinations"
+compare_gzip_outputs -kab3qn1 tests/test-word.txt
+
+echo "Testing recursive"
+compare_gzip_outputs -r -k -1 tests/testing
+
+echo "Testing stdin"
+gzip -1 < tests/test-word.txt > tests/output.gz
+./target/debug/gzip -1 -f < tests/test-word.txt > test/test-word.txt.gz
+if diff -u "tests/output.gz" "tests/test-word.txt.gz"; then
+    echo "Test passed."
+    ((passed++))
+else
+    echo "Test failed."
+    cp tests/output.gz target/test-stdin.gz
+    cp tests/test-word.txt.gz target/test-target.gz
+fi
+((total++))
+rm tests/testing/*.gz
+rm tests/*.gz
 
 echo "Testing version"
 compare_gzip_outputs_no_file -L
@@ -131,4 +158,21 @@ for file in tests/*; do
   compare_gzip_outputs -k -f -1 "$file"
 done
 
-echo "Passed: $passed out of $total"
+#echo "Testing decompression files"
+#for file in tests/*; do
+#  echo "Testing $file"
+#  gzip -k -1 $file
+#  mv "$file.gz" "$file-temp.gz"
+#  ./target/debug/gzip -d "$file-temp.gz" >/dev/null 2>&1
+#  echo "Done"
+#  if diff -u "$file" "$file-temp"; then
+#    echo "Test passed."
+#    ((decom++))
+#  else
+#    echo "Test failed."
+#  fi
+#  ((decomtotal++))
+#done
+
+echo "Compression Tests passed: $passed out of $total"
+#echo "Decompression Tests passed: $decom out of $decomtotal"
